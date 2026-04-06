@@ -403,6 +403,8 @@ mod platform {
     use winapi::shared::basetsd::LONG_PTR;
     use winapi::shared::minwindef::{HIWORD, LOWORD, LPARAM, LRESULT, UINT, WPARAM};
     use winapi::shared::windef::{HBRUSH, HICON, HMENU, HWND};
+    use winapi::shared::winerror::ERROR_CLASS_ALREADY_EXISTS;
+    use winapi::um::errhandlingapi::GetLastError;
     use winapi::um::libloaderapi::GetModuleHandleW;
     use winapi::um::winuser::{
         BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BST_CHECKED, BST_UNCHECKED, CB_ADDSTRING,
@@ -553,7 +555,7 @@ mod platform {
         wnd_class.lpszClassName = class_name.as_ptr();
         wnd_class.hbrBackground = 16 as HBRUSH;
 
-        if RegisterClassW(&wnd_class) == 0 {
+        if RegisterClassW(&wnd_class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
             return Err(anyhow!("failed to register settings window class"));
         }
 

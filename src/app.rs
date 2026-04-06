@@ -4,6 +4,7 @@ use crate::config::{AppConfig, AppPaths, GestureAction};
 use crate::ffi::{self, Point};
 use crate::logging;
 use crate::settings_ui::{self, SettingsWindowHandle};
+use crate::single_instance;
 use crate::touchpad::{self, TouchpadEvent};
 use crate::tray;
 use anyhow::{Context, Result};
@@ -42,6 +43,7 @@ struct TouchpadRuntime {
 }
 
 pub fn run() -> Result<()> {
+    let _single_instance = single_instance::acquire()?;
     let paths = AppPaths::resolve()?;
     logging::init(&paths)?;
     ffi::hide_console_window();
@@ -209,8 +211,14 @@ fn handle_command(
             settings_window.open()?;
         }
         AppCommand::ApplyConfig(new_config) => {
-            apply_config(paths, config, controller, touchpad_runtime, new_config)?;
-            settings_window.refresh();
+            match apply_config(paths, config, controller, touchpad_runtime, new_config) {
+                Ok(()) => settings_window.refresh(),
+                Err(error) => {
+                    log::error!("failed to apply config: {error:#}");
+                    ffi::show_error_dialog("3-win-drag settings error", &error.to_string());
+                    settings_window.refresh();
+                }
+            }
         }
         AppCommand::Exit => {
             log::info!("exit requested");

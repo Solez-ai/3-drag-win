@@ -32,6 +32,8 @@ mod platform {
     };
     use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
     use winapi::shared::ntdef::HANDLE;
+    use winapi::shared::winerror::ERROR_CLASS_ALREADY_EXISTS;
+    use winapi::um::errhandlingapi::GetLastError;
     use winapi::um::libloaderapi::GetModuleHandleW;
     use winapi::um::winuser::{
         CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
@@ -156,7 +158,7 @@ mod platform {
         wnd_class.hInstance = instance;
         wnd_class.lpszClassName = class_name.as_ptr();
 
-        if RegisterClassW(&wnd_class) == 0 {
+        if RegisterClassW(&wnd_class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
             return Err(anyhow!("failed to register touchpad listener window class"));
         }
 
