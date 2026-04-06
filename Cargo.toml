@@ -1,0 +1,47 @@
+[package]
+name = "three-win-drag"
+version = "0.1.0"
+edition = "2024"
+authors = ["Samin Yeasar"]
+license = "MIT"
+description = "Professional background utility for dragging windows from anywhere with a modifier gesture."
+readme = "README.md"
+build = "build.rs"
+
+[[bin]]
+name = "3-win-drag"
+path = "src/main.rs"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[dependencies]
+anyhow = "1.0.100"
+auto-launch = "0.6.0"
+crossbeam-channel = "0.5.15"
+directories = "6.0.0"
+log = "0.4.28"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+simplelog = "0.12.2"
+tray-item = "0.7.0"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3.9", features = ["hidpi", "hidsdi", "libloaderapi", "shellapi", "wincon", "winuser"] }
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+cc = "1.2.33"
+embed-resource = "3.0.6"
+image = { version = "0.25.8", default-features = false, features = ["ico", "png"] }
