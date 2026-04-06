@@ -48,7 +48,6 @@ pub fn run() -> Result<()> {
     logging::init(&paths)?;
     ffi::hide_console_window();
     ffi::bootstrap_process();
-    let existing_config = paths.config_path().exists();
 
     let mut config = match AppConfig::load_or_create(&paths) {
         Ok(config) => config,
@@ -57,20 +56,6 @@ pub fn run() -> Result<()> {
             AppConfig::default()
         }
     };
-
-    if !existing_config {
-        let hardware = settings_ui::detect_hardware();
-        if let Some(recommended) =
-            settings_ui::apply_template(&hardware.recommended_template, &config)
-        {
-            config = recommended;
-            log::info!(
-                "applied initial hardware template | profile={} | reason={}",
-                hardware.recommended_template,
-                hardware.recommendation_reason
-            );
-        }
-    }
 
     autostart::synchronize(config.launch_at_startup)?;
     persist_config(&paths, &config);

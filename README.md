@@ -6,7 +6,7 @@
 
 3-win-drag is a professional Windows background utility that brings true three-finger touchpad window dragging to the desktop with a native, low-latency feel. The application is designed to let users move standard desktop windows from anywhere on screen instead of depending on the title bar, while remaining lightweight enough to stay active for the entire session with minimal overhead.
 
-This repository implements the architecture defined in `SPEC.md` with a Rust application core and a native C++ window-control layer. Rust owns orchestration, input handling, state, configuration, startup integration, tray behavior, and drag logic. C++ owns the direct window-management calls so the runtime can interact with the Windows API through a thin FFI boundary. The result is a background utility that is structured for long-term maintenance rather than a throwaway prototype.
+This repository implements the architecture with a Rust application core and a native C++ window-control layer. Rust owns orchestration, input handling, state, configuration, startup integration, tray behavior, and drag logic. C++ owns the direct window-management calls so the runtime can interact with the Windows API through a thin FFI boundary. The result is a background utility that is structured for long-term maintenance rather than a throwaway prototype.
 
 ## Product Goals
 
@@ -36,7 +36,7 @@ Linux extensibility is preserved in the project structure and design intent, but
 - Silent background execution with no visible console window.
 - System tray presence using the project logo as the application icon.
 - Native Windows settings window for live configuration changes.
-- Touchpad templates with vendor-aware first-launch auto-selection and manual switching.
+- Touchpad templates with vendor-aware recommendations and manual switching.
 - Three-finger precision touchpad gesture detection.
 - Relative window movement based on touchpad centroid movement and an anchor window position.
 - Deadzone filtering to suppress jitter from micro-movements.
@@ -61,6 +61,7 @@ At startup the application performs the following sequence:
 3. Hide any attached console window and run as a background application.
 4. Enable DPI awareness for more consistent positioning.
 5. Load configuration from disk or create a default configuration on first launch.
+   The default first-run profile is `drag_drop_precise`.
 6. Synchronize the auto-start setting with the Windows startup registry.
 7. Create the tray icon and its menu.
 8. Start the raw touchpad input listener.
@@ -166,13 +167,13 @@ Default configuration:
 {
   "enabled": true,
   "launch_at_startup": true,
-  "touchpad_profile": "balanced",
-  "gesture_action": "window_move",
+  "touchpad_profile": "drag_drop_precise",
+  "gesture_action": "mouse_drag",
   "gesture_finger_count": 3,
-  "touchpad_sensitivity": 1.0,
-  "deadzone_pixels": 6,
+  "touchpad_sensitivity": 0.68,
+  "deadzone_pixels": 8,
   "minimum_update_interval_ms": 4,
-  "smoothing_factor": 1.0,
+  "smoothing_factor": 0.8,
   "ignore_fullscreen_windows": true
 }
 ```
@@ -213,7 +214,7 @@ The app includes a native Windows settings window so users can tune behavior wit
 
 - Open it from the tray menu with `Open settings`
 - The window reuses the application icon and opens as a normal desktop window
-- On a fresh install, the app auto-detects the laptop and starts with the closest available template
+- Fresh installs default to the `drag_drop_precise` profile so native drag-and-drop works immediately
 - Changes apply live while the app is running
 - Template application writes the config file and updates the running app
 
@@ -258,6 +259,25 @@ cargo build
 
 ```powershell
 cargo build --release
+```
+
+### Build the Windows installer
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-installer.ps1
+```
+
+The installer build script:
+
+- builds the release executable
+- generates the wizard assets from `logo.png`
+- creates the installer guide page text from the project README
+- compiles the final Windows installer with Inno Setup
+
+Installer output:
+
+```text
+dist\installer\3-win-drag-setup-<version>.exe
 ```
 
 ### Run the release executable

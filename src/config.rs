@@ -74,13 +74,13 @@ impl Default for AppConfig {
         Self {
             enabled: true,
             launch_at_startup: true,
-            touchpad_profile: String::from("balanced"),
-            gesture_action: GestureAction::WindowMove,
+            touchpad_profile: String::from("drag_drop_precise"),
+            gesture_action: GestureAction::MouseDrag,
             gesture_finger_count: 3,
-            touchpad_sensitivity: 1.0,
-            deadzone_pixels: 6,
+            touchpad_sensitivity: 0.68,
+            deadzone_pixels: 8,
             minimum_update_interval_ms: 4,
-            smoothing_factor: 1.0,
+            smoothing_factor: 0.8,
             ignore_fullscreen_windows: true,
         }
     }
@@ -95,7 +95,7 @@ pub enum GestureAction {
 
 impl Default for GestureAction {
     fn default() -> Self {
-        Self::WindowMove
+        Self::MouseDrag
     }
 }
 
@@ -152,9 +152,9 @@ mod tests {
         let config = AppConfig::default();
         assert!(config.enabled);
         assert!(config.launch_at_startup);
-        assert_eq!(config.touchpad_profile, "balanced");
-        assert_eq!(config.gesture_action, GestureAction::WindowMove);
+        assert_eq!(config.touchpad_profile, "drag_drop_precise");
+        assert_eq!(config.gesture_action, GestureAction::MouseDrag);
         assert_eq!(config.gesture_finger_count, 3);
-        assert_eq!(config.touchpad_sensitivity, 1.0);
+        assert_eq!(config.touchpad_sensitivity, 0.68);
     }
 }
