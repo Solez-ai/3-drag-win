@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <windows.h>
+#include <winuser.h>
 
 namespace {
 
@@ -49,12 +50,7 @@ bool is_fullscreen_or_unsupported(HWND hwnd) {
         rect.right >= monitor_info.rcMonitor.right &&
         rect.bottom >= monitor_info.rcMonitor.bottom;
 
-    const auto style = static_cast<unsigned long>(GetWindowLongW(hwnd, GWL_STYLE));
-    const auto ex_style = static_cast<unsigned long>(GetWindowLongW(hwnd, GWL_EXSTYLE));
-    const bool has_caption = (style & WS_CAPTION) != 0;
-    const bool topmost = (ex_style & WS_EX_TOPMOST) != 0;
-
-    return covers_monitor && (!has_caption || topmost);
+    return covers_monitor;
 }
 
 void restore_maximized_window(HWND hwnd, int cursor_x, int cursor_y) {
@@ -101,7 +97,14 @@ DRAG_API int drag_prepare_foreground_window(int cursor_x, int cursor_y, DragWind
         return 0;
     }
 
-    HWND hwnd = GetForegroundWindow();
+    POINT cursor_point { cursor_x, cursor_y };
+    HWND hwnd = WindowFromPoint(cursor_point);
+    if (hwnd != nullptr) {
+        hwnd = GetAncestor(hwnd, GA_ROOT);
+    }
+    if (hwnd == nullptr) {
+        hwnd = GetForegroundWindow();
+    }
     if (hwnd == nullptr || IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0) {
         return 0;
     }

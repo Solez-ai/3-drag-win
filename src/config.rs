@@ -78,9 +78,9 @@ impl Default for AppConfig {
             gesture_action: GestureAction::MouseDrag,
             gesture_finger_count: 3,
             touchpad_sensitivity: 0.68,
-            deadzone_pixels: 8,
-            minimum_update_interval_ms: 4,
-            smoothing_factor: 0.8,
+            deadzone_pixels: 2,
+            minimum_update_interval_ms: 1,
+            smoothing_factor: 1.0,
             ignore_fullscreen_windows: true,
         }
     }

@@ -339,9 +339,12 @@ impl DragController {
                     return;
                 }
 
+                let Some(cursor) = ffi::current_cursor_position() else {
+                    return;
+                };
                 Point::new(
-                    anchor_window.x + session.total_delta_x.round() as i32,
-                    anchor_window.y + session.total_delta_y.round() as i32,
+                    anchor_window.x + (cursor.x - session.anchor_cursor.x),
+                    anchor_window.y + (cursor.y - session.anchor_cursor.y),
                 )
             }
             GestureAction::MouseDrag => Point::new(
