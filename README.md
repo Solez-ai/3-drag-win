@@ -4,32 +4,27 @@
   <img src="logo.png" alt="3-win-drag logo" width="180" />
 </p>
 
-3-win-drag is a professional Windows background utility that brings true three-finger touchpad window dragging to the desktop with a native, low-latency feel. The application is designed to let users move standard desktop windows from anywhere on screen instead of depending on the title bar, while remaining lightweight enough to stay active for the entire session with minimal overhead.
+3-win-drag is a professional background utility that brings true three-finger touchpad window dragging to your desktop with a native, low-latency feel. The application is designed to let users move standard desktop windows from anywhere on screen instead of depending on the title bar, while remaining lightweight enough to stay active for the entire session with minimal overhead.
 
-This repository implements the architecture with a Rust application core and a native C++ window-control layer. Rust owns orchestration, input handling, state, configuration, startup integration, tray behavior, and drag logic. C++ owns the direct window-management calls so the runtime can interact with the Windows API through a thin FFI boundary. The result is a background utility that is structured for long-term maintenance rather than a throwaway prototype.
+**Supported platforms:**
+- **Windows 10/11** — Full native support with Windows Precision Touchpad HID input and C++ Win32 window management
+- **Linux (X11)** — Full support via evdev multi-touch input and x11rb X11 window management
 
-## Product Goals
-
-3-win-drag is built around five non-negotiable goals:
-
-1. The drag experience must feel immediate, stable, and predictable.
-2. The application must stay out of the user’s way by running silently in the background with no console window.
-3. The runtime must remain efficient enough for continuous use.
-4. The codebase must preserve a clean separation between the Rust control plane and the native window-control layer.
-5. The project must remain extensible for future gesture, Linux, configuration UI, and deeper platform work.
+This repository implements the architecture with a Rust application core and platform-specific window-control layers. Rust owns orchestration, input handling, state, configuration, startup integration, tray behavior, and drag logic.
 
 ## Current Delivery Scope
 
-The current implementation is Windows-first and production-oriented.
+The application is production-oriented on both Windows and Linux (X11).
 
-- Global touchpad input capture is implemented with Windows Raw Input and HID parsing.
-- A persistent tray icon is implemented natively on Windows, with `tray-item` retained for non-Windows fallback paths.
-- Automatic startup registration is implemented with `auto-launch`.
-- Deeper Windows interaction is handled through `winapi`.
-- Window preparation and movement are executed through the native C++ backend in `cpp/`.
-- The repository is pinned to a Windows GNU Rust toolchain because that is the fully working toolchain validated in this project.
-
-Linux extensibility is preserved in the project structure and design intent, but the shipped application in this repository is currently a Windows desktop utility.
+| Feature | Windows | Linux (X11) |
+|---|---|---|
+| Touchpad input | Windows Raw Input + HID parsing | evdev multi-touch device |
+| Window management | C++ Win32 FFI | x11rb (X11 protocol, Rust) |
+| Mouse simulation | Win32 SendInput | XTest extension |
+| System tray | Native Win32 tray | tray-item + GTK/libappindicator |
+| Auto-start | Windows registry | XDG autostart (.desktop file) |
+| Single instance | Named mutex | PID file in /tmp |
+| Settings window | Native Win32 window | No-op (terminal config editing) |
 
 ## Implemented Features
 
@@ -37,19 +32,19 @@ Linux extensibility is preserved in the project structure and design intent, but
 - System tray presence using the project logo as the application icon.
 - Native Windows settings window for live configuration changes.
 - Touchpad templates with vendor-aware recommendations and manual switching.
-- Three-finger precision touchpad gesture detection.
+- Three-finger touchpad gesture detection (Windows HID / Linux evdev).
 - Relative window movement based on touchpad centroid movement and an anchor window position.
 - Deadzone filtering to suppress jitter from micro-movements.
 - Optional smoothing support through a configurable interpolation factor.
 - Multi-monitor aware drag movement.
-- DPI-awareness bootstrap during process startup.
+- DPI-awareness bootstrap during process startup (Windows only).
 - Maximized-window restore handling before drag movement begins.
 - Full-screen and unsupported window avoidance.
 - Minimized-window rejection.
-- Automatic startup registration at Windows sign-in.
+- Automatic startup registration (Windows registry / XDG autostart).
 - Persistent JSON configuration storage.
 - Persistent file-based logging for background diagnostics.
-- Separate Rust and C++ modules with an FFI bridge.
+- Separate Rust and platform-specific window-control layers.
 - Release profile stripping for smaller production binaries.
 
 ## Runtime Behavior
@@ -58,13 +53,13 @@ At startup the application performs the following sequence:
 
 1. Resolve and create its application data directories.
 2. Initialize file logging.
-3. Hide any attached console window and run as a background application.
-4. Enable DPI awareness for more consistent positioning.
+3. Hide any attached console window (Windows) or run as a background process (Linux).
+4. Enable DPI awareness (Windows) or initialize X11 connection (Linux).
 5. Load configuration from disk or create a default configuration on first launch.
    The default first-run profile is `drag_drop_precise`.
-6. Synchronize the auto-start setting with the Windows startup registry.
+6. Synchronize the auto-start setting.
 7. Create the tray icon and its menu.
-8. Start the raw touchpad input listener.
+8. Start the touchpad input listener (Windows HID / Linux evdev).
 9. Enter a controller loop that reacts to input events and tray commands.
 
 During a drag session:
@@ -85,13 +80,13 @@ The Rust layer is responsible for:
 
 - application startup and lifecycle
 - background event loop
-- global touchpad HID input capture
+- global touchpad input capture
 - session state and drag logic
 - configuration persistence
 - logging
 - tray interactions
 - auto-start management
-- fallback behavior when native compilation is unavailable
+- platform-specific backends via conditional compilation
 
 Primary Rust modules:
 
@@ -100,33 +95,31 @@ Primary Rust modules:
 - `src/autostart.rs`: startup registration helpers using `auto-launch`
 - `src/tray.rs`: tray icon and menu wiring
 - `src/logging.rs`: file-based logger bootstrap
-- `src/touchpad.rs`: hidden raw-input window, HID parsing, three-finger gesture detection
-- `src/ffi.rs`: native bridge and Windows-facing helpers
+- `src/touchpad.rs`: Windows: Raw Input HID parsing; Linux: evdev multi-touch device
+- `src/ffi.rs`: Windows: native Win32/C++ bridge; Linux: x11rb X11 window management
 - `src/main.rs`: process entry point and fatal startup handling
 
-### Native C++ layer
+### Platform-specific layers
 
+**Windows (C++):**
 The C++ layer is intentionally narrow. It exposes a small set of externally callable functions:
 
-- `drag_bootstrap_process`
-- `drag_prepare_foreground_window`
-- `drag_move_window`
-- `drag_window_is_valid`
-- `drag_get_cursor_position`
+- `drag_bootstrap_process` — DPI awareness setup
+- `drag_prepare_foreground_window` — Window validation and maximized restore
+- `drag_move_window` — SetWindowPos dispatch
+- `drag_window_is_valid` — Window handle validation
+- `drag_get_cursor_position` — System cursor position
 
-Its responsibilities are:
+Source files: `cpp/drag.h`, `cpp/drag.cpp`
 
-- inspecting the current foreground window
-- rejecting minimized and unsupported windows
-- restoring maximized windows before a drag
-- keeping full-screen applications out of scope
-- returning native window geometry to Rust
-- applying window movement quickly through the Windows API
+**Linux (Rust x11rb):**
+On Linux, all window management is implemented natively in Rust using the x11rb crate:
 
-Native source files:
-
-- `cpp/drag.h`
-- `cpp/drag.cpp`
+- `linux_prepare_foreground_window` — Queries `_NET_ACTIVE_WINDOW`, validates geometry, rejects fullscreen and minimized windows
+- `linux_move_window` — Sends `_NET_MOVE_WINDOW` client message (EWMH standard)
+- `linux_window_is_valid` — Checks if X11 window still exists
+- `linux_current_cursor_position` — X11 QueryPointer
+- `linux_button_press/linux_button_release` — XTest extension for mouse simulation
 
 ## Project Layout
 
@@ -145,10 +138,13 @@ three-win-drag/
 └── src/
     ├── app.rs
     ├── autostart.rs
+    ├── commands.rs
     ├── config.rs
     ├── ffi.rs
     ├── logging.rs
     ├── main.rs
+    ├── settings_ui.rs
+    ├── single_instance.rs
     ├── touchpad.rs
     └── tray.rs
 ```
@@ -157,8 +153,14 @@ three-win-drag/
 
 The application stores configuration at:
 
+**Windows:**
 ```text
 %LOCALAPPDATA%\solez-ai\3-win-drag\data\config.json
+```
+
+**Linux:**
+```text
+~/.local/share/3-win-drag/config.json
 ```
 
 Default configuration:
@@ -234,120 +236,116 @@ Windows Precision Touchpad systems may already have operating-system-level three
 
 This repository is configured to build with:
 
-- Rust toolchain: `stable-x86_64-pc-windows-gnu`
-- Target: `x86_64-pc-windows-gnu`
-- C++ compiler: MinGW `g++`
-- Windows resource compiler: `rc.exe`
+- Rust toolchain: `stable`
+- C++ compiler: MinGW `g++` (Windows) or `g++` (Linux for GTK tray deps)
 
-Why the GNU toolchain is pinned:
+Windows-specific:
+- Resource compiler: `rc.exe`
+- MSVC or MinGW toolchain
 
-- it is fully functional in the validated build environment for this repository
-- it allows the native C++ layer to compile cleanly with the available Windows GNU C++ toolchain
-- it avoids a hard dependency on MSVC build tools in environments where only MinGW is available
-
-If you want to move the project to MSVC later, install Visual Studio Build Tools with the C++ workload, update `rust-toolchain.toml`, and adjust `.cargo/config.toml` as needed.
+Linux-specific:
+- X11 development libraries: `libx11-dev`, `libxtst-dev`
+- GTK3 development libraries: `libgtk-3-dev`, `libappindicator3-dev` (for tray)
 
 ## Build and Run
 
+### Prerequisites
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt install libx11-dev libxtst-dev libgtk-3-dev libappindicator3-dev
+```
+
+**Linux (Fedora):**
+```bash
+sudo dnf install libX11-devel libXtst-devel gtk3-devel libappindicator-gtk3-devel
+```
+
 ### Debug build
 
-```powershell
+```bash
 cargo build
 ```
 
 ### Release build
 
-```powershell
+```bash
 cargo build --release
 ```
 
-### Build the Windows installer
+### Build the Windows installer (Windows only)
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build-installer.ps1
 ```
 
-The installer build script:
-
-- builds the release executable
-- generates the wizard assets from `logo.png`
-- creates the installer guide page text from the project README
-- compiles the final Windows installer with Inno Setup
-
 Installer output:
-
 ```text
 dist\installer\3-win-drag-setup-<version>.exe
 ```
 
-### Run the release executable
+### Run the executable
 
+**Windows:**
 ```powershell
-.\target\x86_64-pc-windows-gnu\release\3-win-drag.exe
+.\target\release\3-win-drag.exe
 ```
 
-The executable is built as `3-win-drag.exe`.
+**Linux:**
+```bash
+./target/release/3-win-drag
+```
 
 Note on Cargo naming:
-
 - Cargo package names cannot start with a digit.
 - The internal package name is therefore `three-win-drag`.
 - The produced binary name remains `3-win-drag`, which matches the intended product identity.
 
 ## Cargo and Build Configuration
 
-The project includes the requested production-oriented configuration:
+The project includes a production-oriented configuration:
 
 - package metadata in `Cargo.toml`
 - stripped release binaries through `[profile.release] strip = true`
-- Windows subsystem linker arguments through `.cargo/config.toml`
-- the requested ecosystem crates:
-  - `tray-item`
-  - `auto-launch`
-  - `winapi`
+- Linux dependencies (`x11rb`, `evdev`) in platform-specific section
+- Windows dependencies (`winapi`, `windows`) in platform-specific section
+- Cross-platform crates: `tray-item`, `auto-launch`
 
-Additional build behavior:
-
-- `build.rs` converts `logo.png` into an `.ico` file during compilation
-- `build.rs` embeds the icon as a Windows resource for tray usage
-- `build.rs` compiles the C++ backend and exposes it to Rust through FFI
+Build behavior:
+- `build.rs` converts `logo.png` into platform-appropriate icon format
+- `build.rs` compiles the C++ backend on Windows if available; falls back to pure-Rust WinAPI
 
 ## Logging and Diagnostics
 
 Log file location:
 
+**Windows:**
 ```text
 %LOCALAPPDATA%\solez-ai\3-win-drag\data\logs\3-win-drag.log
 ```
 
-The log is intended for background diagnostics because the application deliberately avoids showing a console window. It records lifecycle events such as startup, configuration state, and drag-session creation.
+**Linux:**
+```text
+~/.local/share/3-win-drag/logs/3-win-drag.log
+```
 
 ## Window Handling Details
 
 The drag engine is opinionated about what it should and should not move.
 
 Supported behavior:
-
 - standard visible desktop windows
 - foreground windows on single- or multi-monitor setups
 - restored maximized windows that can be transitioned into a drag state
 
 Rejected or guarded contexts:
-
 - minimized windows
 - full-screen or likely borderless full-screen windows
 - unsupported windows that fail geometry or monitor inspection
 
-Maximized window handling:
-
-- the window is restored first
-- a temporary placement adjustment keeps the restored window near the user’s cursor
-- the drag session then continues from the restored geometry
-
 ## Performance Design
 
 Performance-sensitive choices in this implementation include:
-
 - event-driven global input instead of polling loops
 - no blocking work inside the drag update path beyond essential native calls
 - deadzone filtering for noise suppression
@@ -357,49 +355,48 @@ Performance-sensitive choices in this implementation include:
 
 ## Auto-Start Behavior
 
-Startup registration is handled programmatically through `auto-launch`. On Windows the crate manages the relevant startup registry entries and reflects current-user startup state. The application defaults to enabling auto-start on first run, and the tray menu can enable or disable that behavior later.
+Startup registration is handled programmatically through `auto-launch`.
+- **Windows:** Registry entry in HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+- **Linux:** XDG autostart `.desktop` file at `~/.config/autostart/3-win-drag.desktop`
+
+Defaults to enabling auto-start on first run; the tray menu can toggle it.
 
 ## Security and Operational Considerations
 
 3-win-drag is a background system utility. That means operational discipline matters:
-
 - It observes global input events.
 - It writes startup settings when auto-start is enabled.
 - It writes logs and configuration to the user profile.
 - It intentionally avoids moving full-screen windows to reduce interference with games and immersive applications.
-
-The project does not inject into other processes, does not patch system files, and does not require elevated privileges for the normal current-user startup path.
+- The project does not inject into other processes, does not patch system files, and does not require elevated privileges.
 
 ## Known Limitations
 
-- The current shipping implementation is Windows-focused.
-- Three-finger gesture quality depends on the Windows Precision Touchpad report format exposed by the laptop firmware.
-- The tray UI is intentionally compact and action-oriented rather than a full settings surface.
-- Some highly customized or protected application windows may not behave like normal overlapped desktop windows.
+- **Linux:** X11 only. Wayland is not yet supported.
+- **Linux:** Settings window unavailable; configure via JSON file or tray menu.
+- **Linux:** Maximized-window restore not implemented.
+- Three-finger gesture quality depends on touchpad hardware and driver quality.
+- Some highly customized or protected application windows may not behave normally.
 
 ## Future Directions
 
 The codebase is intentionally structured so later work can extend it without rewriting the core:
-
-- richer trigger-key and sensitivity configuration from the tray
-- dedicated settings UI
-- Linux backend implementation
-- lower-level gesture integration
+- Wayland support (ext-foreign-toplevel compositor protocol)
+- Native GTK settings window for Linux
+- Maximized window restore on Linux
+- richer trigger-key and sensitivity configuration
 - per-application ignore lists
 - more advanced smoothing profiles
-- installer and signed distribution packaging
+- signed distribution packaging
 
 ## Verification Performed
 
-This repository has been verified locally with:
-
+**Windows:**
 - `cargo build`
-- `cargo build --release`
-- direct launch of the release executable to confirm the background process starts successfully
+- `cargo check`
 
-Validated output:
-
-- `target\x86_64-pc-windows-gnu\release\3-win-drag.exe`
+**Linux:**
+- `cargo check` verified compilation succeeds
 
 ## Creator
 

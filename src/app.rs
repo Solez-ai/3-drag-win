@@ -252,8 +252,18 @@ fn apply_config(
     Ok(())
 }
 
+#[cfg(windows)]
 fn open_path(path: &std::path::Path) -> Result<()> {
     Command::new("explorer.exe")
+        .arg(path)
+        .spawn()
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn open_path(path: &std::path::Path) -> Result<()> {
+    Command::new("xdg-open")
         .arg(path)
         .spawn()
         .with_context(|| format!("failed to open {}", path.display()))?;

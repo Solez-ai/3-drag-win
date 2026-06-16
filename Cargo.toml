@@ -41,6 +41,13 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13.1", default-features = false, features = ["allow-unsafe-code", "xtest"] }
+evdev = "0.12.1"
+gtk4 = "0.9.3"
+glib = "0.20.9"
+gdk-pixbuf = "0.20.10"
+
 [build-dependencies]
 cc = "1.2.33"
 embed-resource = "3.0.6"

@@ -1,39 +1,33 @@
 use anyhow::{Context, Result};
+use auto_launch::{AutoLaunch, AutoLaunchBuilder};
 
 #[cfg(windows)]
-use auto_launch::{AutoLaunch, AutoLaunchBuilder, WindowsEnableMode};
+use auto_launch::WindowsEnableMode;
 
 pub fn synchronize(enabled: bool) -> Result<()> {
-    #[cfg(windows)]
-    {
-        let launcher = build_launcher()?;
-        let current = launcher.is_enabled().unwrap_or(false);
+    let launcher = build_launcher()?;
+    let current = launcher.is_enabled().unwrap_or(false);
 
-        match (enabled, current) {
-            (true, false) => launcher.enable().context("failed to enable auto-start")?,
-            (false, true) => launcher.disable().context("failed to disable auto-start")?,
-            _ => {}
-        }
+    match (enabled, current) {
+        (true, false) => launcher.enable().context("failed to enable auto-start")?,
+        (false, true) => launcher.disable().context("failed to disable auto-start")?,
+        _ => {}
     }
 
     Ok(())
 }
 
 pub fn set_enabled(enabled: bool) -> Result<()> {
-    #[cfg(windows)]
-    {
-        let launcher = build_launcher()?;
-        if enabled {
-            launcher.enable().context("failed to enable auto-start")?;
-        } else {
-            launcher.disable().context("failed to disable auto-start")?;
-        }
+    let launcher = build_launcher()?;
+    if enabled {
+        launcher.enable().context("failed to enable auto-start")?;
+    } else {
+        launcher.disable().context("failed to disable auto-start")?;
     }
 
     Ok(())
 }
 
-#[cfg(windows)]
 fn build_launcher() -> Result<AutoLaunch> {
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
     let exe = exe.to_string_lossy().into_owned();
@@ -41,8 +35,18 @@ fn build_launcher() -> Result<AutoLaunch> {
     let mut builder = AutoLaunchBuilder::new();
     builder
         .set_app_name("3-win-drag")
-        .set_app_path(&exe)
-        .set_windows_enable_mode(WindowsEnableMode::CurrentUser);
+        .set_app_path(&exe);
+
+    #[cfg(windows)]
+    builder.set_windows_enable_mode(WindowsEnableMode::CurrentUser);
+
+    #[cfg(target_os = "linux")]
+    {
+        // On Linux, auto-launch uses XDG autostart (.desktop files).
+        // The default behavior creates ~/.config/autostart/3-win-drag.desktop.
+        // We need to pass the full path with any X11-specific arguments.
+        builder.set_app_path(&format!("{exe}"));
+    }
 
     builder
         .build()

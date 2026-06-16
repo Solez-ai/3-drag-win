@@ -25,7 +25,7 @@ mod platform {
     }
 
     pub fn acquire() -> Result<SingleInstanceGuard> {
-        let name = wide("Local\\ThreeWinDragSingleton");
+        let name = wide("Local\\\\ThreeWinDragSingleton");
         unsafe {
             let handle = CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr());
             if handle.is_null() {
@@ -48,7 +48,56 @@ mod platform {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod platform {
+    use super::{Result, anyhow};
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::path::Path;
+
+    const PID_FILE: &str = "/tmp/3-win-drag.pid";
+
+    pub struct SingleInstanceGuard;
+
+    impl Drop for SingleInstanceGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(PID_FILE);
+        }
+    }
+
+    pub fn acquire() -> Result<SingleInstanceGuard> {
+        let pid_path = Path::new(PID_FILE);
+
+        // Check if PID file exists and the process is alive
+        if pid_path.exists() {
+            let mut contents = String::new();
+            if let Ok(mut file) = fs::File::open(pid_path) {
+                if file.read_to_string(&mut contents).is_ok() {
+                    if let Ok(pid) = contents.trim().parse::<i32>() {
+                        // Check if process with this PID is running
+                        let proc_path = format!("/proc/{pid}");
+                        if Path::new(&proc_path).exists() {
+                            return Err(anyhow!(
+                                "3-win-drag is already running (PID {pid}). Close the existing instance first."
+                            ));
+                        }
+                    }
+                }
+            }
+            // Stale PID file, remove it
+            let _ = fs::remove_file(pid_path);
+        }
+
+        // Write our PID
+        let pid = std::process::id();
+        fs::write(pid_path, pid.to_string())
+            .map_err(|e| anyhow!("failed to write PID file {PID_FILE}: {e}"))?;
+
+        Ok(SingleInstanceGuard)
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 mod platform {
     use super::Result;
 

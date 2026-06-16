@@ -10,17 +10,30 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(has_cpp_backend)");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR should be set"));
-    let icon_path = out_dir.join("3-win-drag.ico");
-    generate_icon(&icon_path);
+
+    // Generate icon for tray use (PNG on Linux, ICO on Windows)
+    let icon_path = if env::var("CARGO_CFG_WINDOWS").is_ok() {
+        let path = out_dir.join("3-win-drag.ico");
+        generate_icon(&path, "ico");
+        path
+    } else {
+        // On Linux, generate a PNG for the tray
+        let path = out_dir.join("3-win-drag.png");
+        generate_icon(&path, "png");
+        path
+    };
+
     println!(
         "cargo:rustc-env=THREE_WIN_DRAG_ICON_PATH={}",
         icon_path.display()
     );
 
+    // Windows-specific resource compilation
     if env::var("CARGO_CFG_WINDOWS").is_ok() {
         compile_windows_resources(&out_dir, &icon_path);
     }
 
+    // Windows C++ backend compilation
     if env::var("CARGO_CFG_WINDOWS").is_ok() && compiler_available() {
         cc::Build::new()
             .cpp(true)
@@ -34,6 +47,12 @@ fn main() {
         println!(
             "cargo:warning=MSVC-compatible C++ compiler was not found. Building with the Rust Windows backend fallback."
         );
+    }
+
+    // On Linux, set the has_libinput cfg if the system has libinput development headers
+    // This is for the tray-item crate which needs GTK on Linux
+    if env::var("CARGO_CFG_UNIX").is_ok() {
+        println!("cargo:rustc-cfg=has_cpp_backend");
     }
 }
 
@@ -52,14 +71,16 @@ fn command_exists(command: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn generate_icon(target_path: &Path) {
-    let image = image::open("logo.png")
+fn generate_icon(target_path: &Path, format: &str) {
+    let img = image::open("logo.png")
         .expect("logo.png must be available for icon generation")
         .resize(256, 256, image::imageops::FilterType::Lanczos3)
         .into_rgba8();
-    image
-        .save(target_path)
-        .expect("failed to generate icon from logo.png");
+
+    match format {
+        "ico" => img.save(target_path).expect("failed to generate .ico from logo.png"),
+        _ => img.save(target_path).expect("failed to generate icon from logo.png"),
+    }
 }
 
 fn compile_windows_resources(out_dir: &Path, icon_path: &Path) {

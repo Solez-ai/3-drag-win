@@ -8,6 +8,10 @@ pub enum TouchpadEvent {
     GestureEnd,
 }
 
+// ═══════════════════════════════════════════════════
+// Windows Platform (Raw Input HID)
+// ═══════════════════════════════════════════════════
+
 #[cfg(windows)]
 mod platform {
     #![allow(unsafe_op_in_unsafe_fn)]
@@ -750,7 +754,412 @@ mod platform {
     }
 }
 
-#[cfg(not(windows))]
+// ═══════════════════════════════════════════════════
+// Linux Platform (evdev multi-touch)
+// ═══════════════════════════════════════════════════
+
+#[cfg(target_os = "linux")]
+mod platform {
+    use super::{Result, Sender, TouchpadEvent, anyhow};
+    use evdev::{Device, EventType, FetchEventsSynced, GrabMode};
+    use log::{error, info, warn};
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    // Multi-touch event codes
+    const ABS_MT_SLOT: u16 = 0x2f; // 47
+    const ABS_MT_TRACKING_ID: u16 = 0x39; // 57
+    const ABS_MT_POSITION_X: u16 = 0x35; // 53
+    const ABS_MT_POSITION_Y: u16 = 0x36; // 54
+
+    pub struct ListenerHandle {
+        stopped: Arc<AtomicBool>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl Drop for ListenerHandle {
+        fn drop(&mut self) {
+            self.stopped.store(true, Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// Query screen dimensions from the X11 server via a transient connection.
+    fn screen_dimensions() -> (f64, f64) {
+        if let Ok((conn, _)) = x11rb::connect(None) {
+            let screen = &conn.setup().roots[0];
+            (screen.width_in_pixels as f64, screen.height_in_pixels as f64)
+        } else {
+            warn!("failed to connect to X11 for screen dimensions, using default 1920x1080");
+            (1920.0, 1080.0)
+        }
+    }
+
+    pub fn spawn_listener(
+        sender: Sender<TouchpadEvent>,
+        required_fingers: u8,
+        sensitivity: f32,
+    ) -> Result<ListenerHandle> {
+        let (screen_width, screen_height) = screen_dimensions();
+        info!("screen dimensions: {screen_width}x{screen_height}");
+
+        let device_path = find_touchpad_device()?;
+        info!("opening touchpad device: {}", device_path.display());
+
+        let mut device = Device::open(&device_path)
+            .map_err(|e| anyhow!("failed to open touchpad device {}: {e}", device_path.display()))?;
+
+        info!(
+            "touchpad device: {} ({} {})",
+            device.name().unwrap_or("unknown"),
+            device.phys().unwrap_or(""),
+            device.uniq().unwrap_or("")
+        );
+
+        // Get axis ranges for coordinate normalization
+        let abs_x = device
+            .get_abs_info(evdev::AbsoluteAxisType(ABS_MT_POSITION_X))
+            .ok();
+        let abs_y = device
+            .get_abs_info(evdev::AbsoluteAxisType(ABS_MT_POSITION_Y))
+            .ok();
+
+        let x_min = abs_x.map(|a| a.minimum()).unwrap_or(0) as f64;
+        let x_max = abs_x.map(|a| a.maximum()).unwrap_or(1000) as f64;
+        let y_min = abs_y.map(|a| a.minimum()).unwrap_or(0) as f64;
+        let y_max = abs_y.map(|a| a.maximum()).unwrap_or(1000) as f64;
+
+        info!(
+            "touchpad axis ranges: X=[{}..{}] Y=[{}..{}]",
+            x_min, x_max, y_min, y_max
+        );
+
+        // Grab the device for exclusive access
+        match device.grab(GrabMode::Grab) {
+            Ok(()) => info!("touchpad device grabbed successfully"),
+            Err(e) => warn!("failed to grab touchpad device (may still work): {e}"),
+        }
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stopped_clone = stopped.clone();
+
+        let thread = thread::Builder::new()
+            .name("touchpad-listener".into())
+            .spawn(move || {
+                let _ = ready_tx.send(());
+                let mut state = TouchpadEvdevState {
+                    sender,
+                    required_fingers,
+                    sensitivity,
+                    screen_width,
+                    screen_height,
+                    x_scale: x_max - x_min,
+                    y_scale: y_max - y_min,
+                    active_contacts: HashMap::new(),
+                    active_centroid: None,
+                    pending_centroid: None,
+                    stable_activation_frames: 0,
+                    missing_frames: 0,
+                };
+
+                loop {
+                    if stopped_clone.load(Ordering::SeqCst) {
+                        break;
+                    }
+
+                    match device.fetch_events() {
+                        Ok(events) => {
+                            if let Err(e) = state.process_events(events) {
+                                error!("touchpad event processing error: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            error!("touchpad fetch_events error: {e}");
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                    }
+                }
+            })
+            .map_err(|e| anyhow!("failed to spawn touchpad listener thread: {e}"))?;
+
+        let _ = ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| anyhow!("touchpad listener thread did not start in time"))?;
+
+        Ok(ListenerHandle {
+            stopped,
+            thread: Some(thread),
+        })
+    }
+
+    /// Find the first touchpad input device by scanning /dev/input/
+    fn find_touchpad_device() -> Result<std::path::PathBuf> {
+        let input_dir = Path::new("/dev/input");
+        if !input_dir.exists() {
+            return Err(anyhow!("/dev/input directory does not exist. Are you on Linux with input device access?"));
+        }
+
+        let entries = fs::read_dir(input_dir)
+            .map_err(|e| anyhow!("failed to list /dev/input: {e}"))?;
+
+        let mut candidates: Vec<(std::path::PathBuf, u32)> = Vec::new();
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            let path = entry.path();
+            let name = match path.file_name() {
+                Some(n) => n.to_string_lossy(),
+                None => continue,
+            };
+
+            if !name.starts_with("event") {
+                continue;
+            }
+
+            // Try to open and identify the device
+            let device = match Device::open(&path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            let device_name = device.name().unwrap_or("").to_lowercase();
+
+            // Check for touchpad capability: must have multi-touch X/Y
+            let has_mt_x = device
+                .get_abs_info(evdev::AbsoluteAxisType(ABS_MT_POSITION_X))
+                .is_ok();
+            let has_mt_y = device
+                .get_abs_info(evdev::AbsoluteAxisType(ABS_MT_POSITION_Y))
+                .is_ok();
+
+            if !has_mt_x || !has_mt_y {
+                continue;
+            }
+
+            // Score the device based on name
+            let score = score_touchpad_name(&device_name);
+            if score > 0 {
+                candidates.push((path, score));
+            }
+        }
+
+        // Sort by score descending, pick the best match
+        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+
+        if let Some((best, _)) = candidates.into_iter().next() {
+            return Ok(best);
+        }
+
+        Err(anyhow!(
+            "no touchpad device found. Ensure you have a touchpad and are in the 'input' group."
+        ))
+    }
+
+    /// Score a device name for how likely it is to be the main touchpad
+    fn score_touchpad_name(name: &str) -> u32 {
+        let keywords = [
+            ("touchpad", 100u32),
+            ("touch pad", 100),
+            ("synaptics", 90),
+            ("elan", 90),
+            ("tpps/2", 85),
+            ("alps", 80),
+            ("cypress", 75),
+            ("sentelic", 70),
+            ("fti", 60),
+            ("wacom", 50),
+            ("i2c", 40),
+            ("hid", 30),
+            ("msft", 25),
+            ("pnp0c50", 25),
+            ("pointing stick", -50),
+            ("trackpoint", -50),
+            ("keyboard", -100),
+            ("mouse", -50),
+        ];
+
+        let mut score = 0u32;
+        for (kw, s) in &keywords {
+            if name.contains(kw) {
+                if *s > 50 {
+                    // strong positive signals
+                    score = score.max(*s);
+                } else if *s > 0 {
+                    score = score.saturating_add(*s);
+                } else {
+                    // negative signals - subtract
+                    score = score.saturating_sub(s.unsigned_abs());
+                }
+            }
+        }
+
+        score
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct PointF {
+        x: f64,
+        y: f64,
+    }
+
+    struct TouchpadEvdevState {
+        sender: Sender<TouchpadEvent>,
+        required_fingers: u8,
+        sensitivity: f32,
+        screen_width: f64,
+        screen_height: f64,
+        x_scale: f64,
+        y_scale: f64,
+        active_contacts: HashMap<u32, (f64, f64)>, // slot -> (normalized_x, normalized_y)
+        active_centroid: Option<PointF>,
+        pending_centroid: Option<PointF>,
+        stable_activation_frames: u8,
+        missing_frames: u8,
+    }
+
+    impl TouchpadEvdevState {
+        fn process_events(&mut self, events: FetchEventsSynced<'_, '_>) -> Result<()> {
+            let mut current_slot: u32 = 0;
+            let mut syn_received = false;
+
+            for event in events {
+                let event_type = event.event_type();
+                let code = event.code();
+                let value = event.value();
+
+                if event_type == EventType::EV_ABS {
+                    match code {
+                        ABS_MT_SLOT => {
+                            current_slot = value as u32;
+                        }
+                        ABS_MT_TRACKING_ID => {
+                            if value < 0 {
+                                // Finger lifted
+                                self.active_contacts.remove(&current_slot);
+                            } else {
+                                // New or continuing contact - ensure the slot exists
+                                // (will be updated when we get X/Y)
+                                if !self.active_contacts.contains_key(&current_slot) {
+                                    self.active_contacts.insert(current_slot, (0.0, 0.0));
+                                }
+                            }
+                        }
+                        ABS_MT_POSITION_X => {
+                            let nx = if self.x_scale > 0.0 {
+                                (value as f64 / self.x_scale).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            let entry = self
+                                .active_contacts
+                                .entry(current_slot)
+                                .or_insert((nx, 0.0));
+                            entry.0 = nx;
+                        }
+                        ABS_MT_POSITION_Y => {
+                            let ny = if self.y_scale > 0.0 {
+                                (value as f64 / self.y_scale).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            let entry = self
+                                .active_contacts
+                                .entry(current_slot)
+                                .or_insert((0.0, ny));
+                            entry.1 = ny;
+                        }
+                        _ => {}
+                    }
+                } else if event_type == EventType::EV_SYN {
+                    syn_received = true;
+                }
+            }
+
+            if syn_received {
+                self.process_frame();
+            }
+
+            Ok(())
+        }
+
+        fn process_frame(&mut self) {
+            let finger_count = self.active_contacts.len();
+
+            if finger_count == self.required_fingers as usize && !self.active_contacts.is_empty() {
+                // Compute centroid
+                let (sum_x, sum_y) = self
+                    .active_contacts
+                    .values()
+                    .fold((0.0f64, 0.0f64), |(sx, sy), &(x, y)| (sx + x, sy + y));
+                let n = self.active_contacts.len() as f64;
+                let centroid = PointF {
+                    x: sum_x / n,
+                    y: sum_y / n,
+                };
+
+                self.missing_frames = 0;
+
+                if let Some(previous) = self.active_centroid {
+                    let dx = ((centroid.x - previous.x) * self.screen_width * self.sensitivity as f64)
+                        .clamp(-48.0, 48.0);
+                    let dy = ((centroid.y - previous.y) * self.screen_height * self.sensitivity as f64)
+                        .clamp(-48.0, 48.0);
+
+                    if dx.abs() > 0.2 || dy.abs() > 0.2 {
+                        let _ = self.sender.send(TouchpadEvent::GestureDelta { dx, dy });
+                    }
+                    self.active_centroid = Some(centroid);
+                    return;
+                } else if let Some(previous) = self.pending_centroid {
+                    self.stable_activation_frames =
+                        self.stable_activation_frames.saturating_add(1);
+                    if self.stable_activation_frames >= 2 {
+                        let _ = self.sender.send(TouchpadEvent::GestureStart);
+                        self.active_centroid = Some(centroid);
+                        self.pending_centroid = None;
+                        return;
+                    }
+
+                    self.pending_centroid = Some(PointF {
+                        x: (previous.x + centroid.x) / 2.0,
+                        y: (previous.y + centroid.y) / 2.0,
+                    });
+                    return;
+                }
+
+                self.pending_centroid = Some(centroid);
+                self.stable_activation_frames = 1;
+                return;
+            }
+
+            // Not the right number of fingers
+            self.pending_centroid = None;
+            self.stable_activation_frames = 0;
+            self.missing_frames = self.missing_frames.saturating_add(1);
+            if self.missing_frames >= 2 && self.active_centroid.take().is_some() {
+                let _ = self.sender.send(TouchpadEvent::GestureEnd);
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════
+// Non-Windows/Linux Fallback (macOS, BSD, etc.)
+// ═══════════════════════════════════════════════════
+
+#[cfg(not(any(windows, target_os = "linux")))]
 mod platform {
     use super::{Result, Sender, TouchpadEvent, anyhow};
 
@@ -762,7 +1171,7 @@ mod platform {
         _sensitivity: f32,
     ) -> Result<ListenerHandle> {
         Err(anyhow!(
-            "three-finger touchpad input is only implemented on Windows"
+            "three-finger touchpad input is only implemented on Windows and Linux"
         ))
     }
 }

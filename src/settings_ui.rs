@@ -208,6 +208,20 @@ pub fn apply_template(template_id: &str, current: &AppConfig) -> Option<AppConfi
 }
 
 pub fn detect_hardware() -> HardwareInfo {
+    #[cfg(windows)]
+    let mut info = detect_hardware_windows();
+
+    #[cfg(not(windows))]
+    let mut info = detect_hardware_linux();
+
+    let (recommended_template, reason) = recommend_template(&info);
+    info.recommended_template = recommended_template.to_string();
+    info.recommendation_reason = reason;
+    info
+}
+
+#[cfg(windows)]
+fn detect_hardware_windows() -> HardwareInfo {
     let output = Command::new("powershell")
         .args([
             "-NoProfile",
@@ -218,7 +232,7 @@ pub fn detect_hardware() -> HardwareInfo {
         ])
         .output();
 
-    let mut info = match output {
+    match output {
         Ok(output) if output.status.success() => parse_hardware_output(&output.stdout),
         _ => HardwareInfo {
             manufacturer: String::from("Unknown"),
@@ -229,12 +243,60 @@ pub fn detect_hardware() -> HardwareInfo {
                 "Hardware detection was unavailable. Falling back to the balanced profile.",
             ),
         },
+    }
+}
+
+#[cfg(not(windows))]
+fn detect_hardware_linux() -> HardwareInfo {
+    let manufacturer = std::fs::read_to_string("/sys/class/dmi/id/sys_vendor")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "To be filled by O.E.M.")
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    let model = std::fs::read_to_string("/sys/class/dmi/id/product_name")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "To be filled by O.E.M.")
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    let touchpads = detect_linux_touchpads();
+
+    HardwareInfo {
+        manufacturer,
+        model,
+        touchpads,
+        recommended_template: String::new(),
+        recommendation_reason: String::new(),
+    }
+}
+
+#[cfg(not(windows))]
+fn detect_linux_touchpads() -> Vec<String> {
+    let mut touchpads = Vec::new();
+    let contents = match std::fs::read_to_string("/proc/bus/input/devices") {
+        Ok(c) => c,
+        Err(_) => return touchpads,
     };
 
-    let (recommended_template, reason) = recommend_template(&info);
-    info.recommended_template = recommended_template.to_string();
-    info.recommendation_reason = reason;
-    info
+    for line in contents.lines() {
+        if line.starts_with("N: Name=") {
+            if let Some(name) = line.strip_prefix("N: Name=\"") {
+                if let Some(name) = name.strip_suffix('"') {
+                    let lower = name.to_lowercase();
+                    if lower.contains("touchpad")
+                        || lower.contains("touch pad")
+                        || lower.contains("clickpad")
+                        || (lower.contains("synaptics") && lower.contains("touch"))
+                        || (lower.contains("elan") && lower.contains("touch"))
+                    {
+                        touchpads.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    touchpads
 }
 
 fn parse_hardware_output(output: &[u8]) -> HardwareInfo {
@@ -1233,24 +1295,756 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    use super::{AppPaths, Result, Sender};
-    use crate::commands::AppCommand;
+    use super::{
+        AppCommand, AppConfig, AppPaths, GestureAction, HardwareInfo, Result, Sender,
+        TemplateProfile, anyhow, apply_template, detect_hardware, templates,
+    };
+    use crossbeam_channel as crossbeam;
+    use glib;
+    use gtk4 as gtk;
+    use gtk::prelude::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::thread;
 
-    pub struct SettingsWindowHandle;
+    enum SettingsCommand {
+        Open,
+        Refresh,
+        Shutdown,
+    }
+
+    pub struct SettingsWindowHandle {
+        sender: crossbeam::Sender<SettingsCommand>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
 
     impl SettingsWindowHandle {
         pub fn open(&self) -> Result<()> {
+            self.sender
+                .send(SettingsCommand::Open)
+                .map_err(|_| anyhow!("settings window thread has terminated"))?;
             Ok(())
         }
 
-        pub fn refresh(&self) {}
+        pub fn refresh(&self) {
+            let _ = self.sender.send(SettingsCommand::Refresh);
+        }
+    }
+
+    impl Drop for SettingsWindowHandle {
+        fn drop(&mut self) {
+            let _ = self.sender.send(SettingsCommand::Shutdown);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
     }
 
     pub fn spawn_window(
-        _paths: AppPaths,
-        _sender: Sender<AppCommand>,
+        paths: AppPaths,
+        sender: Sender<AppCommand>,
     ) -> Result<SettingsWindowHandle> {
-        Ok(SettingsWindowHandle)
+        let hardware = detect_hardware();
+        let template_profiles = templates();
+
+        let (cmd_tx, cmd_rx) = crossbeam::unbounded::<SettingsCommand>();
+
+        let thread = thread::Builder::new()
+            .name("gtk-settings-window".into())
+            .spawn(move || {
+                run_gtk_window(paths, sender, hardware, template_profiles, cmd_rx);
+            })
+            .map_err(|e| anyhow!("failed to spawn GTK settings window thread: {e}"))?;
+
+        Ok(SettingsWindowHandle {
+            sender: cmd_tx,
+            thread: Some(thread),
+        })
+    }
+
+    fn run_gtk_window(
+        paths: AppPaths,
+        sender: Sender<AppCommand>,
+        hardware: HardwareInfo,
+        templates: Vec<TemplateProfile>,
+        cmd_rx: crossbeam::Receiver<SettingsCommand>,
+    ) {
+        if gtk::init().is_err() {
+            log::error!("Failed to initialize GTK for settings window");
+            return;
+        }
+
+        // --- Create the window ---
+        let window = gtk::Window::builder()
+            .title("3-win-drag Settings")
+            .default_width(780)
+            .default_height(640)
+            .resizable(true)
+            .build();
+
+        // Set window icon from the PNG generated at build time
+        let icon_path = std::path::PathBuf::from(env!("THREE_WIN_DRAG_ICON_PATH"));
+        if icon_path.exists() {
+            if let Ok(pixbuf) = gdk_pixbuf::Pixbuf::from_file(&icon_path) {
+                // for_pixbuf() returns Texture (not Option) in gtk4-rs 0.9.x
+                let texture = gtk::gdk::Texture::for_pixbuf(&pixbuf);
+                window.set_icon(Some(&texture));
+            }
+        }
+
+        // --- Layout: main vertical box with margins ---
+        let main_vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        main_vbox.set_margin_start(20);
+        main_vbox.set_margin_end(20);
+        main_vbox.set_margin_top(20);
+        main_vbox.set_margin_bottom(20);
+        main_vbox.set_spacing(0);
+
+        // --- Hardware section ---
+        let hw_section = create_section_box("Detected hardware", 0);
+        let hardware_label = gtk::Label::new(None);
+        hardware_label.set_halign(gtk::Align::Start);
+        hardware_label.set_xalign(0.0);
+        hardware_label.set_wrap(true);
+        hardware_label.set_max_width_chars(80);
+        let hw_info_text = format!(
+            "{} {}{}",
+            hardware.manufacturer,
+            hardware.model,
+            if hardware.touchpads.is_empty() {
+                String::new()
+            } else {
+                format!(" | Touchpad: {}", hardware.touchpads.join(", "))
+            }
+        );
+        hardware_label.set_text(&hw_info_text);
+        hw_section.append(&hardware_label);
+
+        // --- Recommended template section ---
+        let rec_section = create_section_box("Recommended template", 10);
+        let recommended_label = gtk::Label::new(None);
+        recommended_label.set_halign(gtk::Align::Start);
+        recommended_label.set_xalign(0.0);
+        recommended_label.set_wrap(true);
+        recommended_label.set_max_width_chars(90);
+        let rec_name = template_name(&templates, &hardware.recommended_template);
+        recommended_label.set_text(&format!("{}. {}", rec_name, hardware.recommendation_reason));
+        rec_section.append(&recommended_label);
+
+        // --- Profile row: dropdown + description ---
+        let profile_grid = gtk::Grid::new();
+        profile_grid.set_column_spacing(12);
+        profile_grid.set_row_spacing(6);
+        profile_grid.set_margin_top(14);
+        profile_grid.set_margin_bottom(6);
+
+        let profile_label = gtk::Label::new(Some("Touchpad profile"));
+        profile_label.set_halign(gtk::Align::Start);
+        profile_label.set_xalign(0.0);
+
+        let template_names: Vec<&str> = templates.iter().map(|t| t.name).collect();
+        let template_names_refs: Vec<&str> = template_names.iter().copied().collect();
+        let profile_dropdown = gtk::DropDown::from_strings(&template_names_refs);
+        profile_dropdown.set_halign(gtk::Align::Start);
+        profile_dropdown.set_valign(gtk::Align::Center);
+
+        let template_desc_label = gtk::Label::new(None);
+        template_desc_label.set_halign(gtk::Align::Start);
+        template_desc_label.set_xalign(0.0);
+        template_desc_label.set_wrap(true);
+        template_desc_label.set_max_width_chars(50);
+
+        profile_grid.attach(&profile_label, 0, 0, 1, 1);
+        profile_grid.attach(&profile_dropdown, 0, 1, 1, 1);
+        profile_grid.attach(&template_desc_label, 1, 0, 1, 2);
+
+        // --- Input fields row 1: action, finger count, sensitivity, deadzone ---
+        let fields_grid1 = gtk::Grid::new();
+        fields_grid1.set_column_spacing(12);
+        fields_grid1.set_row_spacing(6);
+        fields_grid1.set_margin_top(10);
+        fields_grid1.set_margin_bottom(6);
+
+        let action_label = gtk::Label::new(Some("Gesture action"));
+        action_label.set_halign(gtk::Align::Start);
+        action_label.set_xalign(0.0);
+        let action_dropdown = gtk::DropDown::from_strings(&["Window move", "Mouse drag"]);
+        action_dropdown.set_halign(gtk::Align::Start);
+
+        let finger_label = create_field_label("Finger count");
+        let finger_count_entry = gtk::Entry::new();
+        finger_count_entry.set_max_width_chars(6);
+
+        let sensitivity_label = create_field_label("Sensitivity");
+        let sensitivity_entry = gtk::Entry::new();
+        sensitivity_entry.set_max_width_chars(8);
+
+        let deadzone_label = create_field_label("Deadzone pixels");
+        let deadzone_entry = gtk::Entry::new();
+        deadzone_entry.set_max_width_chars(6);
+
+        fields_grid1.attach(&action_label, 0, 0, 1, 1);
+        fields_grid1.attach(&action_dropdown, 0, 1, 1, 1);
+        fields_grid1.attach(&finger_label, 1, 0, 1, 1);
+        fields_grid1.attach(&finger_count_entry, 1, 1, 1, 1);
+        fields_grid1.attach(&sensitivity_label, 2, 0, 1, 1);
+        fields_grid1.attach(&sensitivity_entry, 2, 1, 1, 1);
+        fields_grid1.attach(&deadzone_label, 3, 0, 1, 1);
+        fields_grid1.attach(&deadzone_entry, 3, 1, 1, 1);
+
+        // --- Input fields row 2: min interval, smoothing ---
+        let fields_grid2 = gtk::Grid::new();
+        fields_grid2.set_column_spacing(12);
+        fields_grid2.set_row_spacing(6);
+        fields_grid2.set_margin_top(10);
+        fields_grid2.set_margin_bottom(6);
+
+        let interval_label = create_field_label("Minimum update interval (ms)");
+        let min_interval_entry = gtk::Entry::new();
+        min_interval_entry.set_max_width_chars(6);
+
+        let smoothing_label = create_field_label("Smoothing factor");
+        let smoothing_entry = gtk::Entry::new();
+        smoothing_entry.set_max_width_chars(8);
+
+        fields_grid2.attach(&interval_label, 0, 0, 1, 1);
+        fields_grid2.attach(&min_interval_entry, 0, 1, 1, 1);
+        fields_grid2.attach(&smoothing_label, 1, 0, 1, 1);
+        fields_grid2.attach(&smoothing_entry, 1, 1, 1, 1);
+
+        // --- Checkboxes ---
+        let checkbox_grid = gtk::Grid::new();
+        checkbox_grid.set_column_spacing(20);
+        checkbox_grid.set_row_spacing(6);
+        checkbox_grid.set_margin_top(10);
+        checkbox_grid.set_margin_bottom(6);
+
+        let enabled_check = gtk::CheckButton::with_label("Dragging enabled");
+        let autostart_check = gtk::CheckButton::with_label("Launch at startup");
+        let fullscreen_check = gtk::CheckButton::with_label("Ignore full-screen windows");
+
+        checkbox_grid.attach(&enabled_check, 0, 0, 1, 1);
+        checkbox_grid.attach(&autostart_check, 1, 0, 1, 1);
+        checkbox_grid.attach(&fullscreen_check, 2, 0, 1, 1);
+
+        // --- Buttons ---
+        let button_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        button_box.set_margin_top(10);
+        button_box.set_margin_bottom(10);
+
+        let apply_button = gtk::Button::with_label("Save And Apply");
+        apply_button.add_css_class("suggested-action");
+        let recommended_button = gtk::Button::with_label("Apply Recommended");
+        let reload_button = gtk::Button::with_label("Reload");
+
+        button_box.append(&apply_button);
+        button_box.append(&recommended_button);
+        button_box.append(&reload_button);
+
+        // --- Status bar ---
+        let status_label = gtk::Label::new(None);
+        status_label.set_halign(gtk::Align::Start);
+        status_label.set_xalign(0.0);
+        status_label.set_wrap(true);
+        status_label.set_max_width_chars(90);
+        status_label.set_text("Settings are ready.");
+
+        // --- Assemble layout ---
+        main_vbox.append(&hw_section);
+        main_vbox.append(&rec_section);
+        main_vbox.append(&profile_grid);
+        main_vbox.append(&fields_grid1);
+        main_vbox.append(&fields_grid2);
+        main_vbox.append(&checkbox_grid);
+        main_vbox.append(&button_box);
+        main_vbox.append(&status_label);
+
+        window.set_child(Some(&main_vbox));
+
+        // --- Load initial config ---
+        let config = AppConfig::load_or_create(&paths).unwrap_or_default();
+        load_form(
+            &config,
+            &hardware,
+            &templates,
+            &profile_dropdown,
+            &template_desc_label,
+            &action_dropdown,
+            &finger_count_entry,
+            &sensitivity_entry,
+            &deadzone_entry,
+            &min_interval_entry,
+            &smoothing_entry,
+            &enabled_check,
+            &autostart_check,
+            &fullscreen_check,
+        );
+
+        // --- Wire up signals ---
+        let templates_clone1 = templates.clone();
+        let td_label1 = template_desc_label.clone();
+        let fc_entry1 = finger_count_entry.clone();
+        let sens_entry1 = sensitivity_entry.clone();
+        let dz_entry1 = deadzone_entry.clone();
+        let mi_entry1 = min_interval_entry.clone();
+        let sm_entry1 = smoothing_entry.clone();
+        let fs_check1 = fullscreen_check.clone();
+        let ad1 = action_dropdown.clone();
+        let suspend1 = Rc::new(RefCell::new(false));
+
+        profile_dropdown.connect_selected_notify(move |dd| {
+            if *suspend1.borrow() {
+                return;
+            }
+            let idx = dd.selected() as usize;
+            if let Some(template) = templates_clone1.get(idx) {
+                // Update template description
+                td_label1.set_text(&format!(
+                    "{} Action: {} | Sensitivity: {:.2} | Deadzone: {} | Smoothing: {:.2}",
+                    template.description,
+                    template.gesture_action.label(),
+                    template.touchpad_sensitivity,
+                    template.deadzone_pixels,
+                    template.smoothing_factor
+                ));
+                // Preview template values in the form (session-level settings like enabled/autostart are preserved)
+                *suspend1.borrow_mut() = true;
+                fc_entry1.set_text(&template.gesture_finger_count.to_string());
+                sens_entry1.set_text(&format!("{:.2}", template.touchpad_sensitivity));
+                dz_entry1.set_text(&template.deadzone_pixels.to_string());
+                mi_entry1.set_text(&template.minimum_update_interval_ms.to_string());
+                sm_entry1.set_text(&format!("{:.2}", template.smoothing_factor));
+                fs_check1.set_active(template.ignore_fullscreen_windows);
+                ad1.set_selected(action_to_index(template.gesture_action) as u32);
+                *suspend1.borrow_mut() = false;
+            }
+        });
+
+        // Apply button
+        let templates_clone2 = templates.clone();
+        let hardware_clone1 = hardware.clone();
+        let paths_clone1 = paths.clone();
+        let sender_clone1 = sender.clone();
+        let sl1 = status_label.clone();
+
+        apply_button.connect_clicked(move |_| {
+            match collect_form_config_gtk(
+                &profile_dropdown,
+                &action_dropdown,
+                &finger_count_entry,
+                &sensitivity_entry,
+                &deadzone_entry,
+                &min_interval_entry,
+                &smoothing_entry,
+                &enabled_check,
+                &autostart_check,
+                &fullscreen_check,
+                &templates_clone2,
+            ) {
+                Ok(config) => {
+                    match persist_and_send(&paths_clone1, &sender_clone1, &config) {
+                        Ok(()) => {
+                            sl1.set_text("Settings applied.");
+                        }
+                        Err(e) => {
+                            sl1.set_text(&format!("Apply failed: {e}"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    sl1.set_text(&format!("Apply failed: {e}"));
+                }
+            }
+        });
+
+        // Recommended template button
+        let templates_clone3 = templates.clone();
+        let hardware_clone2 = hardware.clone();
+        let paths_clone2 = paths.clone();
+        let sender_clone2 = sender.clone();
+        let sl2 = status_label.clone();
+        let pd3 = profile_dropdown.clone();
+        let td3 = template_desc_label.clone();
+        let ad3 = action_dropdown.clone();
+        let fc3 = finger_count_entry.clone();
+        let sens3 = sensitivity_entry.clone();
+        let dz3 = deadzone_entry.clone();
+        let mi3 = min_interval_entry.clone();
+        let sm3 = smoothing_entry.clone();
+        let en3 = enabled_check.clone();
+        let aut3 = autostart_check.clone();
+        let fs3 = fullscreen_check.clone();
+        let suspend3 = Rc::new(RefCell::new(false));
+
+        recommended_button.connect_clicked(move |_| {
+            let config = match collect_form_config_gtk(
+                &pd3,
+                &ad3,
+                &fc3,
+                &sens3,
+                &dz3,
+                &mi3,
+                &sm3,
+                &en3,
+                &aut3,
+                &fs3,
+                &templates_clone3,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    sl2.set_text(&format!("Cannot apply template: {e}"));
+                    return;
+                }
+            };
+
+            let Some(new_config) = apply_template(&hardware_clone2.recommended_template, &config)
+            else {
+                sl2.set_text("The recommended template is unavailable.");
+                return;
+            };
+
+            match persist_and_send(&paths_clone2, &sender_clone2, &new_config) {
+                Ok(()) => {
+                    *suspend3.borrow_mut() = true;
+                    load_form(
+                        &new_config,
+                        &hardware_clone2,
+                        &templates_clone3,
+                        &pd3,
+                        &td3,
+                        &ad3,
+                        &fc3,
+                        &sens3,
+                        &dz3,
+                        &mi3,
+                        &sm3,
+                        &en3,
+                        &aut3,
+                        &fs3,
+                    );
+                    *suspend3.borrow_mut() = false;
+                    let rec_name = template_name(&templates_clone3, &new_config.touchpad_profile);
+                    sl2.set_text(&format!("Applied recommended template: {rec_name}."));
+                }
+                Err(e) => {
+                    sl2.set_text(&format!("Apply failed: {e}"));
+                }
+            }
+        });
+
+        // Reload button
+        let templates_clone4 = templates.clone();
+        let hardware_clone4 = hardware.clone();
+        let paths_clone4 = paths.clone();
+        let sl4 = status_label.clone();
+        let pd4 = profile_dropdown.clone();
+        let td4 = template_desc_label.clone();
+        let ad4 = action_dropdown.clone();
+        let fc4 = finger_count_entry.clone();
+        let sens4 = sensitivity_entry.clone();
+        let dz4 = deadzone_entry.clone();
+        let mi4 = min_interval_entry.clone();
+        let sm4 = smoothing_entry.clone();
+        let en4 = enabled_check.clone();
+        let aut4 = autostart_check.clone();
+        let fs4 = fullscreen_check.clone();
+
+        reload_button.connect_clicked(move |_| {
+            let config = AppConfig::load_or_create(&paths_clone4).unwrap_or_default();
+            load_form(
+                &config,
+                &hardware_clone4,
+                &templates_clone4,
+                &pd4,
+                &td4,
+                &ad4,
+                &fc4,
+                &sens4,
+                &dz4,
+                &mi4,
+                &sm4,
+                &en4,
+                &aut4,
+                &fs4,
+            );
+            sl4.set_text("Reloaded settings from disk.");
+        });
+
+        // --- Hide on close (not destroy) ---
+        let window_clone = window.clone();
+        window.connect_close_request(move |_| {
+            window_clone.set_visible(false);
+            glib::Propagation::Stop
+        });
+
+        // --- Command channel: forward from crossbeam to glib ---
+        let (glib_tx, glib_rx) =
+            glib::MainContext::channel::<SettingsCommand>(glib::Priority::DEFAULT);
+
+        thread::spawn(move || {
+            while let Ok(cmd) = cmd_rx.recv() {
+                if glib_tx.send(cmd).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // --- Hide window initially ---
+        window.set_visible(false);
+
+        // --- Handle commands on the GTK thread ---
+        let w = window.clone();
+        let paths_cmd = paths.clone();
+        let hw_cmd = hardware.clone();
+        let templates_cmd = templates.clone();
+        let pd_cmd = profile_dropdown.clone();
+        let td_cmd = template_desc_label.clone();
+        let ad_cmd = action_dropdown.clone();
+        let fc_cmd = finger_count_entry.clone();
+        let sens_cmd = sensitivity_entry.clone();
+        let dz_cmd = deadzone_entry.clone();
+        let mi_cmd = min_interval_entry.clone();
+        let sm_cmd = smoothing_entry.clone();
+        let en_cmd = enabled_check.clone();
+        let aut_cmd = autostart_check.clone();
+        let fs_cmd = fullscreen_check.clone();
+        let sl_cmd = status_label.clone();
+
+        glib_rx.attach(None, move |cmd| {
+            match cmd {
+                SettingsCommand::Open => {
+                    // Reload config from disk on open
+                    let config = AppConfig::load_or_create(&paths_cmd).unwrap_or_default();
+                    load_form(
+                        &config,
+                        &hw_cmd,
+                        &templates_cmd,
+                        &pd_cmd,
+                        &td_cmd,
+                        &ad_cmd,
+                        &fc_cmd,
+                        &sens_cmd,
+                        &dz_cmd,
+                        &mi_cmd,
+                        &sm_cmd,
+                        &en_cmd,
+                        &aut_cmd,
+                        &fs_cmd,
+                    );
+                    w.present();
+                    w.grab_focus();
+                }
+                SettingsCommand::Refresh => {
+                    if w.is_visible() {
+                        let config =
+                            AppConfig::load_or_create(&paths_cmd).unwrap_or_default();
+                        load_form(
+                            &config,
+                            &hw_cmd,
+                            &templates_cmd,
+                            &pd_cmd,
+                            &td_cmd,
+                            &ad_cmd,
+                            &fc_cmd,
+                            &sens_cmd,
+                            &dz_cmd,
+                            &mi_cmd,
+                            &sm_cmd,
+                            &en_cmd,
+                            &aut_cmd,
+                            &fs_cmd,
+                        );
+                    }
+                }
+                SettingsCommand::Shutdown => {
+                    w.close();
+                    gtk::main_quit();
+                    return glib::ControlFlow::Break;
+                }
+            }
+            glib::ControlFlow::Continue
+        });
+
+        // --- Run GTK main loop ---
+        gtk::main();
+    }
+
+    // --- GTK utility functions ---
+
+    fn create_section_box(title: &str, margin_top: i32) -> gtk::Box {
+        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        vbox.set_margin_top(margin_top);
+
+        let label = gtk::Label::new(Some(title));
+        label.set_halign(gtk::Align::Start);
+        label.set_xalign(0.0);
+        label.add_css_class("heading");
+        vbox.append(&label);
+
+        vbox
+    }
+
+    fn create_field_label(text: &str) -> gtk::Label {
+        let label = gtk::Label::new(Some(text));
+        label.set_halign(gtk::Align::Start);
+        label.set_xalign(0.0);
+        label
+    }
+
+    fn load_form(
+        config: &AppConfig,
+        hardware: &HardwareInfo,
+        templates: &[TemplateProfile],
+        profile_dropdown: &gtk::DropDown,
+        template_desc_label: &gtk::Label,
+        action_dropdown: &gtk::DropDown,
+        finger_count_entry: &gtk::Entry,
+        sensitivity_entry: &gtk::Entry,
+        deadzone_entry: &gtk::Entry,
+        min_interval_entry: &gtk::Entry,
+        smoothing_entry: &gtk::Entry,
+        enabled_check: &gtk::CheckButton,
+        autostart_check: &gtk::CheckButton,
+        fullscreen_check: &gtk::CheckButton,
+    ) {
+        // Set profile selection
+        if let Some(idx) = template_index(templates, &config.touchpad_profile) {
+            profile_dropdown.set_selected(idx as u32);
+        }
+
+        // Update template description
+        if let Some(template) = templates.get(profile_dropdown.selected() as usize) {
+            template_desc_label.set_text(&format!(
+                "{} Action: {} | Sensitivity: {:.2} | Deadzone: {} | Smoothing: {:.2}",
+                template.description,
+                template.gesture_action.label(),
+                template.touchpad_sensitivity,
+                template.deadzone_pixels,
+                template.smoothing_factor
+            ));
+        }
+
+        // Action dropdown
+        action_dropdown.set_selected(action_to_index(config.gesture_action) as u32);
+
+        // Text fields
+        finger_count_entry.set_text(&config.gesture_finger_count.to_string());
+        sensitivity_entry.set_text(&format!("{:.2}", config.touchpad_sensitivity));
+        deadzone_entry.set_text(&config.deadzone_pixels.to_string());
+        min_interval_entry.set_text(&config.minimum_update_interval_ms.to_string());
+        smoothing_entry.set_text(&format!("{:.2}", config.smoothing_factor));
+
+        // Checkboxes
+        enabled_check.set_active(config.enabled);
+        autostart_check.set_active(config.launch_at_startup);
+        fullscreen_check.set_active(config.ignore_fullscreen_windows);
+    }
+
+    fn collect_form_config_gtk(
+        profile_dropdown: &gtk::DropDown,
+        action_dropdown: &gtk::DropDown,
+        finger_count_entry: &gtk::Entry,
+        sensitivity_entry: &gtk::Entry,
+        deadzone_entry: &gtk::Entry,
+        min_interval_entry: &gtk::Entry,
+        smoothing_entry: &gtk::Entry,
+        enabled_check: &gtk::CheckButton,
+        autostart_check: &gtk::CheckButton,
+        fullscreen_check: &gtk::CheckButton,
+        templates: &[TemplateProfile],
+    ) -> Result<AppConfig> {
+        let profile_idx = profile_dropdown.selected() as usize;
+        let touchpad_profile = templates
+            .get(profile_idx)
+            .map(|t| t.id.to_string())
+            .ok_or_else(|| anyhow!("no touchpad profile is selected"))?;
+
+        Ok(AppConfig {
+            enabled: enabled_check.is_active(),
+            launch_at_startup: autostart_check.is_active(),
+            touchpad_profile,
+            gesture_action: index_to_action(action_dropdown.selected() as usize),
+            gesture_finger_count: {
+                let raw = finger_count_entry.text().to_string();
+                let parsed = raw
+                    .trim()
+                    .parse::<u8>()
+                    .map_err(|_| anyhow!("expected a whole number between 3 and 5"))?;
+                parsed.clamp(3, 5)
+            },
+            touchpad_sensitivity: {
+                let raw = sensitivity_entry.text().to_string();
+                let parsed = raw
+                    .trim()
+                    .parse::<f32>()
+                    .map_err(|_| anyhow!("expected a number between 0.20 and 2.00"))?;
+                parsed.clamp(0.20, 2.0)
+            },
+            deadzone_pixels: {
+                let raw = deadzone_entry.text().to_string();
+                let parsed = raw
+                    .trim()
+                    .parse::<i32>()
+                    .map_err(|_| anyhow!("expected a whole number between 1 and 30"))?;
+                parsed.clamp(1, 30)
+            },
+            minimum_update_interval_ms: {
+                let raw = min_interval_entry.text().to_string();
+                let parsed = raw
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|_| anyhow!("expected a whole number between 1 and 20"))?;
+                parsed.clamp(1, 20)
+            },
+            smoothing_factor: {
+                let raw = smoothing_entry.text().to_string();
+                let parsed = raw
+                    .trim()
+                    .parse::<f32>()
+                    .map_err(|_| anyhow!("expected a number between 0.10 and 1.00"))?;
+                parsed.clamp(0.10, 1.0)
+            },
+            ignore_fullscreen_windows: fullscreen_check.is_active(),
+        })
+    }
+
+    fn persist_and_send(
+        paths: &AppPaths,
+        sender: &Sender<AppCommand>,
+        config: &AppConfig,
+    ) -> Result<()> {
+        config.save(paths)?;
+        sender
+            .send(AppCommand::ApplyConfig(config.clone()))
+            .map_err(|_| anyhow!("failed to send settings update to the running app"))
+    }
+
+    fn template_index(templates: &[TemplateProfile], template_id: &str) -> Option<usize> {
+        templates
+            .iter()
+            .position(|template| template.id == template_id)
+    }
+
+    fn template_name(templates: &[TemplateProfile], template_id: &str) -> &'static str {
+        templates
+            .iter()
+            .find(|template| template.id == template_id)
+            .map(|template| template.name)
+            .unwrap_or("Balanced Precision")
+    }
+
+    fn action_to_index(action: GestureAction) -> usize {
+        match action {
+            GestureAction::WindowMove => 0,
+            GestureAction::MouseDrag => 1,
+        }
+    }
+
+    fn index_to_action(index: usize) -> GestureAction {
+        match index {
+            1 => GestureAction::MouseDrag,
+            _ => GestureAction::WindowMove,
+        }
     }
 }
 

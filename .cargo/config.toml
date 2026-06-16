@@ -1,8 +1,3 @@
-[build]
-target = "x86_64-pc-windows-gnu"
-
-[target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "link-args=/SUBSYSTEM:WINDOWS"]
-
-[target.x86_64-pc-windows-gnu]
-rustflags = ["-C", "link-args=-Wl,--subsystem,windows"]
+# Windows subsystem configuration is handled by the `windows_subsystem = "windows"` attribute in main.rs.
+# No additional linker flags are needed here.
+# On Linux, the toolchain is detected automatically.
