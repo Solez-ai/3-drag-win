@@ -1,0 +1,74 @@
+# ─────────────────────────────────────────────────────────────────────
+# Linux Build — GitHub Actions
+#
+# Builds 3-win-drag for Linux on every push and tag, producing:
+#   - x86_64-unknown-linux-gnu  (glibc, broadest compatibility)
+#   - x86_64-unknown-linux-musl (fully static binary)
+#
+# Artifacts are attached as release assets on tags.
+# ─────────────────────────────────────────────────────────────────────
+
+name: linux-build
+
+on:
+  push:
+    branches: [main, master, develop]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build-linux:
+    name: "linux / ${{ matrix.target }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: houseabsolute/actions-rust-cross@v1
+        with:
+          target: ${{ matrix.target }}
+          args: "--release --manifest-path three-win-drag/Cargo.toml"
+
+      - name: Archive binary
+        shell: bash
+        run: |
+          cd three-win-drag
+          PKG_NAME="3-win-drag-${{ matrix.target }}"
+          mkdir -p "$PKG_NAME"
+          cp "target/${{ matrix.target }}/release/3-win-drag" "$PKG_NAME/"
+          cp README.md LICENSE "$PKG_NAME/"
+          tar czf "${PKG_NAME}.tar.gz" "$PKG_NAME/"
+          echo "Archive: ${PKG_NAME}.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3-win-drag-${{ matrix.target }}
+          path: three-win-drag/3-win-drag-${{ matrix.target }}.tar.gz
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            3-win-drag-*/3-win-drag-*.tar.gz
+          generate_release_notes: true

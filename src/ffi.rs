@@ -2,15 +2,7 @@
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
-use std::sync::Mutex;
-#[cfg(target_os = "linux")]
-use std::sync::OnceLock;
-#[cfg(target_os = "linux")]
-use x11rb::connection::Connection;
-#[cfg(target_os = "linux")]
-use x11rb::protocol::xproto;
-#[cfg(target_os = "linux")]
-use x11rb::rust_connection::RustConnection;
+use crate::linux as linux_backend;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Point {
@@ -72,8 +64,8 @@ pub fn bootstrap_process() {
 
     #[cfg(target_os = "linux")]
     {
-        // Initialize X11 connection; this is validated lazily in get_x11_connection()
-        let _ = get_x11_connection().lock();
+        // Initialise the chosen backend (X11/Wayland) — logs which one was detected
+        linux_backend::log_backend_info();
     }
 }
 
@@ -109,7 +101,7 @@ pub fn prepare_foreground_window(cursor: Point) -> Option<WindowSnapshot> {
 
     #[cfg(target_os = "linux")]
     {
-        return linux_prepare_foreground_window(cursor);
+        return linux_backend::prepare_foreground_window(cursor);
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
@@ -148,7 +140,7 @@ pub fn move_window(handle: i64, target: Point) -> bool {
 
     #[cfg(target_os = "linux")]
     {
-        return linux_move_window(handle, target);
+        return linux_backend::move_window(handle, target);
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
@@ -174,7 +166,7 @@ pub fn window_is_valid(handle: i64) -> bool {
 
     #[cfg(target_os = "linux")]
     {
-        return linux_window_is_valid(handle);
+        return linux_backend::window_is_valid(handle);
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
@@ -211,7 +203,7 @@ pub fn current_cursor_position() -> Option<Point> {
 
     #[cfg(target_os = "linux")]
     {
-        return linux_current_cursor_position();
+        return linux_backend::current_cursor_position();
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
@@ -228,7 +220,7 @@ pub fn set_cursor_position(point: Point) -> bool {
 
     #[cfg(target_os = "linux")]
     {
-        return linux_set_cursor_position(point);
+        return linux_backend::set_cursor_position(point);
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
@@ -263,7 +255,7 @@ pub fn mouse_left_button_down() -> bool {
 
     #[cfg(target_os = "linux")]
     {
-        return linux_button_press(1); // button 1 = left
+        return linux_backend::mouse_button(1, true);
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
@@ -295,7 +287,7 @@ pub fn mouse_left_button_up() -> bool {
 
     #[cfg(target_os = "linux")]
     {
-        return linux_button_release(1); // button 1 = left
+        return linux_backend::mouse_button(1, false);
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
@@ -343,220 +335,6 @@ pub fn show_error_dialog(title: &str, message: &str) {
 #[cfg(not(windows))]
 pub fn show_error_dialog(title: &str, message: &str) {
     eprintln!("[{title}] {message}");
-}
-
-// ═══════════════════════════════════════════════════
-// Linux x11rb Backend
-// ═══════════════════════════════════════════════════
-
-#[cfg(target_os = "linux")]
-fn get_x11_connection() -> &'static Mutex<RustConnection> {
-    static X11_CONN: OnceLock<Mutex<RustConnection>> = OnceLock::new();
-    X11_CONN.get_or_init(|| {
-        let (conn, _) = x11rb::connect(None).expect("failed to connect to X11 display");
-        Mutex::new(conn)
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn get_active_window(conn: &RustConnection, screen_root: u32) -> Option<u32> {
-    let atom = conn
-        .intern_atom(false, b"_NET_ACTIVE_WINDOW")
-        .ok()?
-        .atom;
-    let reply = conn
-        .get_property(false, screen_root, atom, xproto::ATOM_WINDOW, 0, 1)
-        .ok()?;
-    if reply.format != 32 || reply.value.len() < 4 {
-        return None;
-    }
-    // Interpret first 4 bytes as u32 little-endian
-    let window =
-        u32::from_ne_bytes([reply.value[0], reply.value[1], reply.value[2], reply.value[3]]);
-    if window == 0 {
-        None
-    } else {
-        Some(window)
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn linux_prepare_foreground_window(_cursor: Point) -> Option<WindowSnapshot> {
-    let conn = get_x11_connection().lock().ok()?;
-    let screen = &conn.setup().roots[0];
-    let window = get_active_window(&*conn, screen.root)?;
-
-    // Validate window: reject unmapped and minimized (iconic) windows
-    let attrs = conn.get_window_attributes(window).ok()?;
-    match attrs.map_state {
-        xproto::MapState::UNMAPPED | xproto::MapState::UNVIEWABLE => return None,
-        _ => {}
-    }
-
-    // Check _NET_WM_STATE for fullscreen via the EWMH atom
-    let fullscreen_atom = conn
-        .intern_atom(false, b"_NET_WM_STATE_FULLSCREEN")
-        .ok()
-        .map(|r| r.atom);
-    if let Some(fs_atom) = fullscreen_atom {
-        let wm_state_atom = conn.intern_atom(false, b"_NET_WM_STATE").ok()?.atom;
-        let state_reply = conn
-            .get_property(false, window, wm_state_atom, xproto::ATOM_ATOM, 0, 1024)
-            .ok()?;
-        if state_reply.format == 32 {
-            // Parse the atoms from the property value (each is 4 bytes)
-            for chunk in state_reply.value.chunks_exact(4) {
-                let atom_val = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                if atom_val == fs_atom {
-                    return None; // Window has _NET_WM_STATE_FULLSCREEN set
-                }
-            }
-        }
-    }
-
-    // Also check geometrically for fullscreen
-    let geom = conn.get_geometry(window).ok()?;
-    let translation = conn
-        .translate_coordinates(window, screen.root, 0, 0)
-        .ok()?;
-
-    let covers_screen = translation.dst_x <= 0
-        && translation.dst_y <= 0
-        && (geom.width as i16) >= screen.width_in_pixels as i16
-        && (geom.height as i16) >= screen.height_in_pixels as i16;
-
-    if covers_screen {
-        return None;
-    }
-
-    Some(WindowSnapshot {
-        handle: window as i64,
-        position: Point::new(translation.dst_x, translation.dst_y),
-        width: geom.width as i32,
-        height: geom.height as i32,
-        was_maximized: false,
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn linux_move_window(handle: i64, target: Point) -> bool {
-    let conn = match get_x11_connection().lock() {
-        Ok(conn) => conn,
-        Err(_) => return false,
-    };
-    let window = handle as u32;
-    let screen = &conn.setup().roots[0];
-
-    // Prefer _NET_MOVE_WINDOW client message (EWMH standard) over raw ConfigureWindow.
-    // This tells the window manager to move the window, which works reliably across
-    // GNOME, KDE, i3, and other EWMH-compliant compositors.
-    let net_move_window = conn
-        .intern_atom(false, b"_NET_MOVE_WINDOW")
-        .ok()
-        .map(|r| r.atom);
-
-    if let Some(atom) = net_move_window {
-        // _NET_MOVE_WINDOW data: flags (0), x_root, y_root, 0 (source), 0 (unused)
-        let data: [u32; 5] = [0, target.x as u32, target.y as u32, 0, 0];
-        let event = xproto::ClientMessageEvent::new_unchecked(
-            window,
-            atom,
-            32, // format = 32-bit
-            data,
-        );
-
-        conn.send_event(
-            true,                         // propagate
-            screen.root,                  // send to root window
-            0xFFu32,                      // event mask: no mask needed for root
-            &xproto::Event::ClientMessage(event),
-        )
-        .ok()?;
-        conn.flush().ok()?;
-        true
-    } else {
-        // Fallback to ConfigureWindow if _NET_MOVE_WINDOW atom is not available
-        conn.configure_window(
-            window,
-            &[xproto::ConfigWindow::X(target.x), xproto::ConfigWindow::Y(target.y)],
-        )
-        .ok()?;
-        conn.flush().ok()?;
-        true
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn linux_window_is_valid(handle: i64) -> bool {
-    let conn = match get_x11_connection().lock() {
-        Ok(conn) => conn,
-        Err(_) => return false,
-    };
-    let window = handle as u32;
-    conn.get_window_attributes(window).is_ok()
-}
-
-#[cfg(target_os = "linux")]
-fn linux_current_cursor_position() -> Option<Point> {
-    let conn = get_x11_connection().lock().ok()?;
-    let screen = &conn.setup().roots[0];
-    let reply = conn.query_pointer(screen.root).ok()?;
-    Some(Point::new(reply.root_x, reply.root_y))
-}
-
-#[cfg(target_os = "linux")]
-fn linux_set_cursor_position(point: Point) -> bool {
-    let conn = match get_x11_connection().lock() {
-        Ok(conn) => conn,
-        Err(_) => return false,
-    };
-    let screen = &conn.setup().roots[0];
-    conn.warp_pointer(screen.root, 0, 0, 0, 0, 0, point.x, point.y)
-        .ok()?;
-    conn.flush().ok()?;
-    true
-}
-
-#[cfg(target_os = "linux")]
-fn linux_button_press(button: u8) -> bool {
-    let conn = match get_x11_connection().lock() {
-        Ok(conn) => conn,
-        Err(_) => return false,
-    };
-    let screen = &conn.setup().roots[0];
-    x11rb::protocol::xtest::fake_input(
-        &*conn,
-        x11rb::protocol::xtest::FakeInput::BUTTON_PRESS,
-        button,
-        0, // current time
-        screen.root,
-        0, // root_x - not needed for button events
-        0, // root_y
-    )
-    .ok()?;
-    conn.flush().ok()?;
-    true
-}
-
-#[cfg(target_os = "linux")]
-fn linux_button_release(button: u8) -> bool {
-    let conn = match get_x11_connection().lock() {
-        Ok(conn) => conn,
-        Err(_) => return false,
-    };
-    let screen = &conn.setup().roots[0];
-    x11rb::protocol::xtest::fake_input(
-        &*conn,
-        x11rb::protocol::xtest::FakeInput::BUTTON_RELEASE,
-        button,
-        0, // current time
-        screen.root,
-        0, // root_x
-        0, // root_y
-    )
-    .ok()?;
-    conn.flush().ok()?;
-    true
 }
 
 // ═══════════════════════════════════════════════════

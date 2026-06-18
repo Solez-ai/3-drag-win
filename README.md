@@ -8,7 +8,9 @@
 
 **Supported platforms:**
 - **Windows 10/11** — Full native support with Windows Precision Touchpad HID input and C++ Win32 window management
-- **Linux (X11)** — Full support via evdev multi-touch input and x11rb X11 window management
+- **Linux** — Full support:
+  - **X11**: evdev multi-touch + x11rb window management
+  - **Wayland**: Compositor-specific backends (Hyprland, Sway, KDE Plasma)
 
 This repository implements the architecture with a Rust application core and platform-specific window-control layers. Rust owns orchestration, input handling, state, configuration, startup integration, tray behavior, and drag logic.
 
@@ -16,15 +18,15 @@ This repository implements the architecture with a Rust application core and pla
 
 The application is production-oriented on both Windows and Linux (X11).
 
-| Feature | Windows | Linux (X11) |
-|---|---|---|
-| Touchpad input | Windows Raw Input + HID parsing | evdev multi-touch device |
-| Window management | C++ Win32 FFI | x11rb (X11 protocol, Rust) |
-| Mouse simulation | Win32 SendInput | XTest extension |
-| System tray | Native Win32 tray | tray-item + GTK/libappindicator |
-| Auto-start | Windows registry | XDG autostart (.desktop file) |
-| Single instance | Named mutex | PID file in /tmp |
-| Settings window | Native Win32 window | No-op (terminal config editing) |
+| Feature | Windows | Linux (X11) | Linux (Wayland) |
+|---|---|---|---|
+| Touchpad input | Windows Raw Input + HID parsing | evdev multi-touch device | evdev multi-touch device |
+| Window management | C++ Win32 FFI | x11rb (X11 protocol, Rust) | Hyprland IPC / Sway IPC / KWin Scripting |
+| Mouse simulation | Win32 SendInput | XTest extension | Hyprland only (fakeinput) |
+| System tray | Native Win32 tray | tray-item + GTK/libappindicator | tray-item + GTK/libappindicator |
+| Auto-start | Windows registry | XDG autostart (.desktop file) | XDG autostart |
+| Single instance | Named mutex | PID file in /tmp | PID file in /tmp |
+| Settings window | Native Win32 window | No-op (edit config.json) | No-op (edit config.json) |
 
 ## Implemented Features
 
@@ -54,7 +56,7 @@ At startup the application performs the following sequence:
 1. Resolve and create its application data directories.
 2. Initialize file logging.
 3. Hide any attached console window (Windows) or run as a background process (Linux).
-4. Enable DPI awareness (Windows) or initialize X11 connection (Linux).
+4. Enable DPI awareness (Windows) or detect and initialise the Linux backend (X11 or Wayland compositor).
 5. Load configuration from disk or create a default configuration on first launch.
    The default first-run profile is `drag_drop_precise`.
 6. Synchronize the auto-start setting.
@@ -96,7 +98,10 @@ Primary Rust modules:
 - `src/tray.rs`: tray icon and menu wiring
 - `src/logging.rs`: file-based logger bootstrap
 - `src/touchpad.rs`: Windows: Raw Input HID parsing; Linux: evdev multi-touch device
-- `src/ffi.rs`: Windows: native Win32/C++ bridge; Linux: x11rb X11 window management
+- `src/ffi.rs`: Windows: native Win32/C++ bridge; Linux: delegates to `src/linux/` backend module
+- `src/linux/mod.rs`: Linux runtime backend detection (X11 vs Wayland, compositor detection)
+- `src/linux/x11.rs`: X11 backend (x11rb) — window management, cursor, mouse simulation
+- `src/linux/wayland.rs`: Wayland backends — Hyprland (hyprctl IPC), Sway (swayipc crate), KDE (KWin Scripting via qdbus)
 - `src/main.rs`: process entry point and fatal startup handling
 
 ### Platform-specific layers
@@ -112,14 +117,11 @@ The C++ layer is intentionally narrow. It exposes a small set of externally call
 
 Source files: `cpp/drag.h`, `cpp/drag.cpp`
 
-**Linux (Rust x11rb):**
-On Linux, all window management is implemented natively in Rust using the x11rb crate:
+**Linux (backend module):**
+On Linux, the `src/linux/` module detects the display server at runtime and selects the appropriate backend:
 
-- `linux_prepare_foreground_window` — Queries `_NET_ACTIVE_WINDOW`, validates geometry, rejects fullscreen and minimized windows
-- `linux_move_window` — Sends `_NET_MOVE_WINDOW` client message (EWMH standard)
-- `linux_window_is_valid` — Checks if X11 window still exists
-- `linux_current_cursor_position` — X11 QueryPointer
-- `linux_button_press/linux_button_release` — XTest extension for mouse simulation
+- **X11 backend** (`src/linux/x11.rs`): Uses the `x11rb` crate — `_NET_ACTIVE_WINDOW` query, `_NET_MOVE_WINDOW` EWMH client message, X11 QueryPointer, XTest mouse simulation
+- **Wayland backends** (`src/linux/wayland.rs`): Compositor-specific IPC via Hyprland `hyprctl`, Sway `swayipc` crate, or KDE KWin Scripting via QDBus
 
 ## Project Layout
 
@@ -128,19 +130,29 @@ three-win-drag/
 ├── .cargo/config.toml
 ├── build.rs
 ├── Cargo.toml
+├── Cross.toml
 ├── LICENSE
 ├── README.md
 ├── logo.png
 ├── rust-toolchain.toml
+├── .github/workflows/linux-build.yml
 ├── cpp/
 │   ├── drag.cpp
 │   └── drag.h
+├── scripts/
+│   ├── build-installer.ps1
+│   ├── build-linux.sh
+│   └── build-linux.ps1
 └── src/
     ├── app.rs
     ├── autostart.rs
     ├── commands.rs
     ├── config.rs
     ├── ffi.rs
+    ├── linux/
+    │   ├── mod.rs     # Runtime backend detection
+    │   ├── x11.rs     # X11 backend (x11rb)
+    │   └── wayland.rs # Wayland backends (Hyprland/Sway/KDE)
     ├── logging.rs
     ├── main.rs
     ├── settings_ui.rs
@@ -246,6 +258,8 @@ Windows-specific:
 Linux-specific:
 - X11 development libraries: `libx11-dev`, `libxtst-dev`
 - GTK3 development libraries: `libgtk-3-dev`, `libappindicator3-dev` (for tray)
+- Wayland development libraries: `libwayland-dev` (for tray)
+- Qt5 D-Bus tools: `qdbus-qt5` or `qt5-qdbus-qt5` (for KDE KWin scripting)
 
 ## Build and Run
 
@@ -253,12 +267,17 @@ Linux-specific:
 
 **Linux (Ubuntu/Debian):**
 ```bash
-sudo apt install libx11-dev libxtst-dev libgtk-3-dev libappindicator3-dev
+sudo apt install libx11-dev libxtst-dev libgtk-3-dev libappindicator3-dev libwayland-dev qt5-qdbus-qt5
 ```
 
 **Linux (Fedora):**
 ```bash
-sudo dnf install libX11-devel libXtst-devel gtk3-devel libappindicator-gtk3-devel
+sudo dnf install libX11-devel libXtst-devel gtk3-devel libappindicator-gtk3-devel wayland-devel qt5-qtbase-common
+```
+
+**Linux (Arch):**
+```bash
+sudo pacman -S libx11 libxtst gtk3 libappindicator-gtk3 wayland qt5-tools
 ```
 
 ### Debug build
@@ -272,6 +291,43 @@ cargo build
 ```bash
 cargo build --release
 ```
+
+### Build Linux release packages
+
+**Native build (on Linux):**
+```bash
+./scripts/build-linux.sh native
+```
+
+**Cross-compile from Windows (requires Docker Desktop):**
+```powershell
+# Install cross
+cargo install cross
+
+# Build for x86_64 glibc (broadest compatibility)
+.\scripts\build-linux.ps1
+
+# Build for ARM64
+.\scripts\build-linux.ps1 -Target aarch64-unknown-linux-gnu
+
+# Build fully static musl binary
+.\scripts\build-linux.ps1 -Musl
+```
+
+**Cross-compile from any platform (requires Docker):**
+```bash
+cargo install cross
+TARGET=x86_64-unknown-linux-gnu ./scripts/build-linux.sh cross
+```
+
+### CI builds via GitHub Actions
+
+Every push to `main`/`master` and every tag `v*` triggers a [GitHub Actions workflow](.github/workflows/linux-build.yml) that builds:
+- `x86_64-unknown-linux-gnu` (glibc, broadest compatibility)
+- `x86_64-unknown-linux-musl` (fully static binary)
+- `aarch64-unknown-linux-gnu` (ARM64)
+
+Tagged releases automatically create a GitHub Release with all three `.tar.gz` archives attached as assets.
 
 ### Build the Windows installer (Windows only)
 
@@ -353,6 +409,37 @@ Performance-sensitive choices in this implementation include:
 - a minimal native ABI surface
 - release-time stripping for smaller production binaries
 
+## Wayland Support Details
+
+Wayland's security model intentionally prevents clients from moving other clients' windows — this is by design, not a limitation. 3-win-drag works around this by using each compositor's private IPC mechanism:
+
+### Hyprland
+- Detected via the `$HYPRLAND_INSTANCE_SIGNATURE` environment variable
+- Uses `hyprctl` CLI commands to get active window info, move windows, set cursor position, and simulate mouse clicks
+- Window movement uses the `movewindowpixel` dispatcher with relative pixel offsets
+- Mouse simulation uses the `fakeinput` dispatcher
+- Requires Hyprland to be running with IPC enabled
+
+### Sway
+- Detected via the `$SWAYSOCK` environment variable
+- Uses the `swayipc` Rust crate for all IPC communication
+- Window movement uses `move absolute position` command
+- Cursor position read from seat state
+- Mouse simulation is **not available** on Sway — use `GestureAction::WindowMove` instead
+
+### KDE Plasma (KWin)
+- Detected via `$XDG_CURRENT_DESKTOP` or `$DESKTOP_SESSION` containing "kde" or "plasma"
+- Uses QDBus to load and execute KWin JavaScript snippets via the `org.kde.KWin.Scripting` interface
+- KWin scripts use the Qt `QFile` API to write results back to a temp file read by 3-win-drag
+- Window manipulation uses the KWin JavaScript `workspace.activeClient` API
+- Mouse simulation is **not available** on KDE Wayland — use `GestureAction::WindowMove` instead
+
+### Wayland known limitations
+- **GNOME** is not supported on Wayland (GNOME/Mutter intentionally exposes no window management protocol)
+- **Mouse simulation** is only available on Hyprland (via `fakeinput`) — `GestureAction::MouseDrag` may not work on Sway or KDE
+- **Window handles** are ephemeral on Wayland — the drag session validates the active window on each frame
+- **XWayland fallback**: If you run 3-win-drag on a Wayland compositor that isn't explicitly supported, it will attempt to fall back to XWayland X11 management, which may not accurately control native Wayland windows
+
 ## Auto-Start Behavior
 
 Startup registration is handled programmatically through `auto-launch`.
@@ -372,22 +459,24 @@ Defaults to enabling auto-start on first run; the tray menu can toggle it.
 
 ## Known Limitations
 
-- **Linux:** X11 only. Wayland is not yet supported.
 - **Linux:** Settings window unavailable; configure via JSON file or tray menu.
 - **Linux:** Maximized-window restore not implemented.
+- **Linux (Wayland):** Mouse simulation only works on Hyprland (via `fakeinput`); Sway and KDE use `WindowMove` gesture only.
+- **Linux (Wayland):** GNOME is not supported — use an X11 session or switch to Hyprland/Sway/KDE.
+- **Linux (Wayland):** Window handles are ephemeral; active window is re-queried each drag frame.
 - Three-finger gesture quality depends on touchpad hardware and driver quality.
 - Some highly customized or protected application windows may not behave normally.
 
 ## Future Directions
 
 The codebase is intentionally structured so later work can extend it without rewriting the core:
-- Wayland support (ext-foreign-toplevel compositor protocol)
 - Native GTK settings window for Linux
 - Maximized window restore on Linux
-- richer trigger-key and sensitivity configuration
-- per-application ignore lists
-- more advanced smoothing profiles
-- signed distribution packaging
+- Richer trigger-key and sensitivity configuration
+- Per-application ignore lists
+- More advanced smoothing profiles
+- Signed distribution packaging
+- GNOME Wayland extension support
 
 ## Verification Performed
 
