@@ -351,7 +351,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-installer.ps1
 
 Installer output:
 ```text
-dist\installer\3-win-drag-setup-<version>.exe
+dist\installer\3-win-drag-setup-0.1.1.exe
 ```
 
 ### Run the executable
