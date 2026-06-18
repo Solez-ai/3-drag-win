@@ -8,12 +8,9 @@ on:
     branches: [main, master]
 
 jobs:
-  native-build:
+  build:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        working-directory: ./three-win-drag
     strategy:
       fail-fast: false
       matrix:
@@ -30,10 +27,9 @@ jobs:
             ext: ""
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install system deps (Linux)
+      - name: Install deps (Linux only)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
@@ -41,8 +37,7 @@ jobs:
             libx11-dev libxtst-dev libgtk-3-dev \
             libappindicator3-dev libwayland-dev 2>/dev/null || true
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
@@ -69,84 +64,23 @@ jobs:
           cp README.md LICENSE "$PKG/"
           tar czf "${PKG}.tar.gz" "$PKG/"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: three-win-drag/${{ matrix.asset_name }}.*
-          compression-level: 0
-          if-no-files-found: error
-
-  cross-build:
-    if: startsWith(github.ref, 'refs/tags/v')
-    name: ${{ matrix.label }}
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./three-win-drag
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - label: Linux x86_64 (musl)
-            target: x86_64-unknown-linux-musl
-            ext: ""
-            asset_name: 3-win-drag-linux-x86_64-musl
-
-          - label: Linux aarch64
-            target: aarch64-unknown-linux-gnu
-            ext: ""
-            asset_name: 3-win-drag-linux-aarch64
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install system deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            libx11-dev libxtst-dev libgtk-3-dev \
-            libappindicator3-dev libwayland-dev \
-            musl-tools gcc-aarch64-linux-gnu 2>/dev/null || true
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
-
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Package
-        run: |
-          PKG="${{ matrix.asset_name }}"
-          mkdir -p "$PKG"
-          cp "target/${{ matrix.target }}/release/3-win-drag${{ matrix.ext }}" "$PKG/"
-          cp README.md LICENSE "$PKG/"
-          tar czf "${PKG}.tar.gz" "$PKG/"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.asset_name }}
-          path: three-win-drag/${{ matrix.asset_name }}.*
+          path: ${{ matrix.asset_name }}.*
           compression-level: 0
           if-no-files-found: error
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [native-build, cross-build]
+    needs: [build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
@@ -154,8 +88,7 @@ jobs:
       - name: List artifacts
         run: ls -la artifacts/
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
-          body_path: three-win-drag/.github/RELEASE_NOTES.md
+          body_path: .github/RELEASE_NOTES.md
