@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════
-// X11 Backend — x11rb pure-Rust X11 protocol implementation
+// X11 Backend - x11rb pure-Rust X11 protocol implementation
 // ═══════════════════════════════════════════════════════════════════════
 
 use std::sync::{Mutex, OnceLock};

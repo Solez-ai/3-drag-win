@@ -64,7 +64,7 @@ pub fn bootstrap_process() {
 
     #[cfg(target_os = "linux")]
     {
-        // Initialise the chosen backend (X11/Wayland) — logs which one was detected
+        // Initialise the chosen backend (X11/Wayland) - logs which one was detected
         linux_backend::log_backend_info();
     }
 }

@@ -7,10 +7,20 @@
 3-win-drag is a professional background utility that brings true three-finger touchpad window dragging to your desktop with a native, low-latency feel. The application is designed to let users move standard desktop windows from anywhere on screen instead of depending on the title bar, while remaining lightweight enough to stay active for the entire session with minimal overhead.
 
 **Supported platforms:**
-- **Windows 10/11** — Full native support with Windows Precision Touchpad HID input and C++ Win32 window management
-- **Linux** — Full support:
+- **Windows 10/11** - Full native support with Windows Precision Touchpad HID input and C++ Win32 window management
+- **Linux** - Full support:
   - **X11**: evdev multi-touch + x11rb window management
   - **Wayland**: Compositor-specific backends (Hyprland, Sway, KDE Plasma)
+
+## Tested Platforms
+
+| Platform | Architecture | Tested OS | Status |
+|---|---|---|---|
+| Windows | x86_64 | Windows 10, Windows 11 | Works |
+| Linux (glibc) | x86_64 | Ubuntu 22.04, Ubuntu 24.04 | Works (most tested) |
+| Linux (glibc) | x86_64 | Manjaro | Needs optimization |
+| Linux (musl) | x86_64 | Not tested | Untested |
+| Linux (glibc) | aarch64 | Not tested | Untested |
 
 This repository implements the architecture with a Rust application core and platform-specific window-control layers. Rust owns orchestration, input handling, state, configuration, startup integration, tray behavior, and drag logic.
 
@@ -100,8 +110,8 @@ Primary Rust modules:
 - `src/touchpad.rs`: Windows: Raw Input HID parsing; Linux: evdev multi-touch device
 - `src/ffi.rs`: Windows: native Win32/C++ bridge; Linux: delegates to `src/linux/` backend module
 - `src/linux/mod.rs`: Linux runtime backend detection (X11 vs Wayland, compositor detection)
-- `src/linux/x11.rs`: X11 backend (x11rb) — window management, cursor, mouse simulation
-- `src/linux/wayland.rs`: Wayland backends — Hyprland (hyprctl IPC), Sway (swayipc crate), KDE (KWin Scripting via qdbus)
+- `src/linux/x11.rs`: X11 backend (x11rb) - window management, cursor, mouse simulation
+- `src/linux/wayland.rs`: Wayland backends - Hyprland (hyprctl IPC), Sway (swayipc crate), KDE (KWin Scripting via qdbus)
 - `src/main.rs`: process entry point and fatal startup handling
 
 ### Platform-specific layers
@@ -109,18 +119,18 @@ Primary Rust modules:
 **Windows (C++):**
 The C++ layer is intentionally narrow. It exposes a small set of externally callable functions:
 
-- `drag_bootstrap_process` — DPI awareness setup
-- `drag_prepare_foreground_window` — Window validation and maximized restore
-- `drag_move_window` — SetWindowPos dispatch
-- `drag_window_is_valid` — Window handle validation
-- `drag_get_cursor_position` — System cursor position
+- `drag_bootstrap_process` - DPI awareness setup
+- `drag_prepare_foreground_window` - Window validation and maximized restore
+- `drag_move_window` - SetWindowPos dispatch
+- `drag_window_is_valid` - Window handle validation
+- `drag_get_cursor_position` - System cursor position
 
 Source files: `cpp/drag.h`, `cpp/drag.cpp`
 
 **Linux (backend module):**
 On Linux, the `src/linux/` module detects the display server at runtime and selects the appropriate backend:
 
-- **X11 backend** (`src/linux/x11.rs`): Uses the `x11rb` crate — `_NET_ACTIVE_WINDOW` query, `_NET_MOVE_WINDOW` EWMH client message, X11 QueryPointer, XTest mouse simulation
+- **X11 backend** (`src/linux/x11.rs`): Uses the `x11rb` crate - `_NET_ACTIVE_WINDOW` query, `_NET_MOVE_WINDOW` EWMH client message, X11 QueryPointer, XTest mouse simulation
 - **Wayland backends** (`src/linux/wayland.rs`): Compositor-specific IPC via Hyprland `hyprctl`, Sway `swayipc` crate, or KDE KWin Scripting via QDBus
 
 ## Project Layout
@@ -322,12 +332,16 @@ TARGET=x86_64-unknown-linux-gnu ./scripts/build-linux.sh cross
 
 ### CI builds via GitHub Actions
 
-Every push to `main`/`master` and every tag `v*` triggers a [GitHub Actions workflow](.github/workflows/linux-build.yml) that builds:
-- `x86_64-unknown-linux-gnu` (glibc, broadest compatibility)
-- `x86_64-unknown-linux-musl` (fully static binary)
-- `aarch64-unknown-linux-gnu` (ARM64)
+Every push to `main`/`master` and every tag `v*` triggers a [GitHub Actions workflow](.github/workflows/linux-build.yml) that builds for all platforms:
 
-Tagged releases automatically create a GitHub Release with all three `.tar.gz` archives attached as assets.
+| Download | Platform | Architecture |
+|---|---|---|
+| `3-win-drag-windows-x64.zip` | Windows 10/11 | x86_64 |
+| `3-win-drag-linux-x86_64.tar.gz` | Linux (glibc) | x86_64 |
+| `3-win-drag-linux-x86_64-musl.tar.gz` | Linux (musl, static) | x86_64 |
+| `3-win-drag-linux-aarch64.tar.gz` | Linux (glibc) | aarch64 / ARM64 |
+
+Tagged releases automatically create a single GitHub Release with all four downloads attached as assets.
 
 ### Build the Windows installer (Windows only)
 
@@ -411,7 +425,7 @@ Performance-sensitive choices in this implementation include:
 
 ## Wayland Support Details
 
-Wayland's security model intentionally prevents clients from moving other clients' windows — this is by design, not a limitation. 3-win-drag works around this by using each compositor's private IPC mechanism:
+Wayland's security model intentionally prevents clients from moving other clients' windows - this is by design, not a limitation. 3-win-drag works around this by using each compositor's private IPC mechanism:
 
 ### Hyprland
 - Detected via the `$HYPRLAND_INSTANCE_SIGNATURE` environment variable
@@ -425,19 +439,19 @@ Wayland's security model intentionally prevents clients from moving other client
 - Uses the `swayipc` Rust crate for all IPC communication
 - Window movement uses `move absolute position` command
 - Cursor position read from seat state
-- Mouse simulation is **not available** on Sway — use `GestureAction::WindowMove` instead
+- Mouse simulation is **not available** on Sway - use `GestureAction::WindowMove` instead
 
 ### KDE Plasma (KWin)
 - Detected via `$XDG_CURRENT_DESKTOP` or `$DESKTOP_SESSION` containing "kde" or "plasma"
 - Uses QDBus to load and execute KWin JavaScript snippets via the `org.kde.KWin.Scripting` interface
 - KWin scripts use the Qt `QFile` API to write results back to a temp file read by 3-win-drag
 - Window manipulation uses the KWin JavaScript `workspace.activeClient` API
-- Mouse simulation is **not available** on KDE Wayland — use `GestureAction::WindowMove` instead
+- Mouse simulation is **not available** on KDE Wayland - use `GestureAction::WindowMove` instead
 
 ### Wayland known limitations
 - **GNOME** is not supported on Wayland (GNOME/Mutter intentionally exposes no window management protocol)
-- **Mouse simulation** is only available on Hyprland (via `fakeinput`) — `GestureAction::MouseDrag` may not work on Sway or KDE
-- **Window handles** are ephemeral on Wayland — the drag session validates the active window on each frame
+- **Mouse simulation** is only available on Hyprland (via `fakeinput`) - `GestureAction::MouseDrag` may not work on Sway or KDE
+- **Window handles** are ephemeral on Wayland - the drag session validates the active window on each frame
 - **XWayland fallback**: If you run 3-win-drag on a Wayland compositor that isn't explicitly supported, it will attempt to fall back to XWayland X11 management, which may not accurately control native Wayland windows
 
 ## Auto-Start Behavior
@@ -462,7 +476,7 @@ Defaults to enabling auto-start on first run; the tray menu can toggle it.
 - **Linux:** Settings window unavailable; configure via JSON file or tray menu.
 - **Linux:** Maximized-window restore not implemented.
 - **Linux (Wayland):** Mouse simulation only works on Hyprland (via `fakeinput`); Sway and KDE use `WindowMove` gesture only.
-- **Linux (Wayland):** GNOME is not supported — use an X11 session or switch to Hyprland/Sway/KDE.
+- **Linux (Wayland):** GNOME is not supported - use an X11 session or switch to Hyprland/Sway/KDE.
 - **Linux (Wayland):** Window handles are ephemeral; active window is re-queried each drag frame.
 - Three-finger gesture quality depends on touchpad hardware and driver quality.
 - Some highly customized or protected application windows may not behave normally.

@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════════
-# build-linux.ps1 — Cross-compile 3-win-drag for Linux from Windows
+# build-linux.ps1 - Cross-compile 3-win-drag for Linux from Windows
 #
 # Prerequisites:
 #   1. Docker Desktop (running)

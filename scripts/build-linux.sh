@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════
-# build-linux.sh — Build 3-win-drag Linux release packages
+# build-linux.sh - Build 3-win-drag Linux release packages
 #
 # Usage:
 #   ./scripts/build-linux.sh              # native build via cargo

@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────
-# Cross.toml — cross-rs cross-compilation configuration
+# Cross.toml - cross-rs cross-compilation configuration
 #
 # Usage:
 #   cargo install cross
@@ -22,11 +22,11 @@ apt-get update && apt-get install -y \
 """
 
 [target.x86_64-unknown-linux-gnu]
-# Default GNU image — best compatibility with mainstream distros
+# Default GNU image - best compatibility with mainstream distros
 image = "x86_64-unknown-linux-gnu"
 
 [target.x86_64-unknown-linux-musl]
-# Fully static binary — works even on minimal containers
+# Fully static binary - works even on minimal containers
 image = "x86_64-unknown-linux-musl"
 
 [target.aarch64-unknown-linux-gnu]

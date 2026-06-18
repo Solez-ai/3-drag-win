@@ -1,14 +1,4 @@
-# ─────────────────────────────────────────────────────────────────────
-# Linux Build — GitHub Actions
-#
-# Builds 3-win-drag for Linux on every push and tag, producing:
-#   - x86_64-unknown-linux-gnu  (glibc, broadest compatibility)
-#   - x86_64-unknown-linux-musl (fully static binary)
-#
-# Artifacts are attached as release assets on tags.
-# ─────────────────────────────────────────────────────────────────────
-
-name: linux-build
+name: build
 
 on:
   push:
@@ -18,57 +8,111 @@ on:
     branches: [main, master]
 
 jobs:
-  build-linux:
-    name: "linux / ${{ matrix.target }}"
-    runs-on: ubuntu-latest
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-gnu
+        include:
+          - label: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: .exe
+            archive: zip
+            asset_name: 3-win-drag-windows-x64
+
+          - label: Linux x86_64 (glibc)
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+            archive: tar.gz
+            asset_name: 3-win-drag-linux-x86_64
+
+          - label: Linux x86_64 (musl)
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            ext: ""
+            archive: tar.gz
+            asset_name: 3-win-drag-linux-x86_64-musl
+
+          - label: Linux aarch64 (glibc)
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            ext: ""
+            archive: tar.gz
+            asset_name: 3-win-drag-linux-aarch64
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: houseabsolute/actions-rust-cross@v1
-        with:
-          target: ${{ matrix.target }}
-          args: "--release --manifest-path three-win-drag/Cargo.toml"
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libx11-dev libxtst-dev libgtk-3-dev \
+            libappindicator3-dev libwayland-dev 2>/dev/null || true
 
-      - name: Archive binary
-        shell: bash
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path three-win-drag/Cargo.toml
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           cd three-win-drag
-          PKG_NAME="3-win-drag-${{ matrix.target }}"
-          mkdir -p "$PKG_NAME"
-          cp "target/${{ matrix.target }}/release/3-win-drag" "$PKG_NAME/"
-          cp README.md LICENSE "$PKG_NAME/"
-          tar czf "${PKG_NAME}.tar.gz" "$PKG_NAME/"
-          echo "Archive: ${PKG_NAME}.tar.gz"
+          $pkg = "${{ matrix.asset_name }}"
+          New-Item -ItemType Directory -Path $pkg -Force | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/3-win-drag${{ matrix.ext }}" "$pkg/"
+          Copy-Item README.md LICENSE "$pkg/"
+          Compress-Archive -Path "$pkg/*" -DestinationPath "${pkg}.zip" -Force
+          echo "archive=${pkg}.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cd three-win-drag
+          PKG="${{ matrix.asset_name }}"
+          mkdir -p "$PKG"
+          cp "target/${{ matrix.target }}/release/3-win-drag${{ matrix.ext }}" "$PKG/"
+          cp README.md LICENSE "$PKG/"
+          tar czf "${PKG}.tar.gz" "$PKG/"
+          echo "archive=${PKG}.tar.gz" >> $GITHUB_ENV
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 3-win-drag-${{ matrix.target }}
-          path: three-win-drag/3-win-drag-${{ matrix.target }}.tar.gz
+          name: ${{ matrix.asset_name }}
+          path: three-win-drag/${{ env.archive }}
+          compression-level: 0
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-linux]
+    needs: [build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            3-win-drag-*/3-win-drag-*.tar.gz
-          generate_release_notes: true
+            3-win-drag-*.zip
+            3-win-drag-*.tar.gz
+          body_path: .github/RELEASE_NOTES.md

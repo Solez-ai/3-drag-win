@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════
-// Linux Backend — Runtime display-server detection + compositor dispatch
+// Linux Backend - Runtime display-server detection + compositor dispatch
 // ═══════════════════════════════════════════════════════════════════════
 
 mod x11;
@@ -36,15 +36,15 @@ pub fn detect() -> DesktopKind {
         || std::env::var("WAYLAND_DISPLAY").is_ok();
 
     if is_wayland {
-        // Hyprland — most popular standalone Wayland compositor
+        // Hyprland - most popular standalone Wayland compositor
         if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
             return DesktopKind::WaylandHyprland;
         }
-        // Sway — i3-compatible wlroots compositor
+        // Sway - i3-compatible wlroots compositor
         if std::env::var("SWAYSOCK").is_ok() {
             return DesktopKind::WaylandSway;
         }
-        // KDE / KWin — most popular full DE on Wayland
+        // KDE / KWin - most popular full DE on Wayland
         let desktop = std::env::var("XDG_CURRENT_DESKTOP")
             .or_else(|_| std::env::var("DESKTOP_SESSION"))
             .unwrap_or_default()
@@ -52,12 +52,11 @@ pub fn detect() -> DesktopKind {
         if desktop.contains("kde") || desktop.contains("plasma") {
             return DesktopKind::WaylandKde;
         }
-        // GNOME / unknown — window management is not possible on GNOME Wayland
+        // GNOME / unknown - window management is not possible on GNOME Wayland
         log::warn!(
             "Wayland detected but compositor '{}' is not supported for window management. \
              Only Hyprland, Sway, and KDE are supported on Wayland.\n\
-             Falling back to XWayland (X11) — window positions may be inaccurate for native \
-             Wayland clients.",
+             Falling back to XWayland (X11) - window positions may be inaccurate for native Wayland clients.",
             desktop
         );
         DesktopKind::Unsupported
@@ -100,7 +99,7 @@ fn backend() -> &'static dyn DesktopBackend {
             DesktopKind::WaylandKde => Box::new(wayland::KdeBackend::new()),
             DesktopKind::Unsupported => {
                 log::error!(
-                    "Unsupported Wayland compositor — window management is disabled.\n\
+                    "Unsupported Wayland compositor. Window management is disabled.\n\
                      Please use an X11 session or one of the supported compositors: \
                      Hyprland, Sway, KDE Plasma."
                 );

@@ -1,12 +1,12 @@
 // ═══════════════════════════════════════════════════════════════════════
-// Wayland Backends — compositor-specific window management
+// Wayland Backends - compositor-specific window management
 //
 // Wayland does not allow arbitrary clients to move other clients' windows
 // by design.  Each compositor provides a bespoke IPC mechanism instead:
 //
-//   Hyprland   — Unix socket + hyprctl CLI (hyprland-rs crate also available)
-//   Sway       — i3-compatible IPC via swayipc crate
-//   KDE Plasma — D-Bus KWin Scripting API via zbus / qdbus
+//   Hyprland   - Unix socket + hyprctl CLI (hyprland-rs crate also available)
+//   Sway       - i3-compatible IPC via swayipc crate
+//   KDE Plasma - D-Bus KWin Scripting API via zbus / qdbus
 // ═══════════════════════════════════════════════════════════════════════
 
 use std::process::Command;
@@ -95,7 +95,7 @@ impl DesktopBackend for HyprlandBackend {
         if let Some(data) = Self::get_active_window() {
             if let Some(current) = Self::parse_window_address(&data) {
                 if current != handle {
-                    log::warn!("Hyprland active window changed during drag — aborting move");
+                    log::warn!("Hyprland active window changed during drag - aborting move");
                     return false;
                 }
             }
@@ -276,7 +276,7 @@ impl DesktopBackend for SwayBackend {
     }
 
     fn mouse_button(&self, _button: u8, _press: bool) -> bool {
-        log::warn!("mouse click simulation not supported on Sway Wayland — use GestureAction::WindowMove instead");
+        log::warn!("mouse click simulation not supported on Sway Wayland - use GestureAction::WindowMove instead");
         false
     }
 
@@ -452,7 +452,7 @@ r#"workspace.cursorPos = {{ x: {}, y: {} }};"#,
     }
 
     fn mouse_button(&self, _button: u8, _press: bool) -> bool {
-        log::warn!("mouse click simulation not supported on KDE Wayland — use GestureAction::WindowMove instead");
+        log::warn!("mouse click simulation not supported on KDE Wayland - use GestureAction::WindowMove instead");
         false
     }
 
