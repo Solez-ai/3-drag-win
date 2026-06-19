@@ -761,7 +761,8 @@ mod platform {
 #[cfg(target_os = "linux")]
 mod platform {
     use super::{Result, Sender, TouchpadEvent, anyhow};
-    use evdev::{Device, EventType, FetchEventsSynced, GrabMode};
+    use evdev::{Device, EventType, FetchEventsSynced, AbsoluteAxisType};
+    use x11rb::connection::Connection;
     use log::{error, info, warn};
     use std::collections::HashMap;
     use std::fs;
@@ -791,8 +792,7 @@ mod platform {
         }
     }
 
-    /// Query screen dimensions from the X11 server via a transient connection.
-    fn screen_dimensions() -> (f64, f64) {
+    fn screen_dimensions_from_x11() -> (f64, f64) {
         if let Ok((conn, _)) = x11rb::connect(None) {
             let screen = &conn.setup().roots[0];
             (screen.width_in_pixels as f64, screen.height_in_pixels as f64)
@@ -807,7 +807,7 @@ mod platform {
         required_fingers: u8,
         sensitivity: f32,
     ) -> Result<ListenerHandle> {
-        let (screen_width, screen_height) = screen_dimensions();
+        let (screen_width, screen_height) = screen_dimensions_from_x11();
         info!("screen dimensions: {screen_width}x{screen_height}");
 
         let device_path = find_touchpad_device()?;
@@ -819,30 +819,26 @@ mod platform {
         info!(
             "touchpad device: {} ({} {})",
             device.name().unwrap_or("unknown"),
-            device.phys().unwrap_or(""),
-            device.uniq().unwrap_or("")
+            device.physical_path().unwrap_or(""),
+            device.unique_name().unwrap_or("")
         );
 
-        // Get axis ranges for coordinate normalization
-        let abs_x = device
-            .get_abs_info(evdev::AbsoluteAxisType(ABS_MT_POSITION_X))
-            .ok();
-        let abs_y = device
-            .get_abs_info(evdev::AbsoluteAxisType(ABS_MT_POSITION_Y))
-            .ok();
+        let abs_state = device.get_abs_state()
+            .map_err(|e| anyhow!("failed to get abs state: {e}"))?;
+        let abs_x = abs_state[AbsoluteAxisType(ABS_MT_POSITION_X).0 as usize];
+        let abs_y = abs_state[AbsoluteAxisType(ABS_MT_POSITION_Y).0 as usize];
 
-        let x_min = abs_x.map(|a| a.minimum()).unwrap_or(0) as f64;
-        let x_max = abs_x.map(|a| a.maximum()).unwrap_or(1000) as f64;
-        let y_min = abs_y.map(|a| a.minimum()).unwrap_or(0) as f64;
-        let y_max = abs_y.map(|a| a.maximum()).unwrap_or(1000) as f64;
+        let x_min = abs_x.minimum as f64;
+        let x_max = abs_x.maximum as f64;
+        let y_min = abs_y.minimum as f64;
+        let y_max = abs_y.maximum as f64;
 
         info!(
             "touchpad axis ranges: X=[{}..{}] Y=[{}..{}]",
             x_min, x_max, y_min, y_max
         );
 
-        // Grab the device for exclusive access
-        match device.grab(GrabMode::Grab) {
+        match device.grab() {
             Ok(()) => info!("touchpad device grabbed successfully"),
             Err(e) => warn!("failed to grab touchpad device (may still work): {e}"),
         }
@@ -900,7 +896,6 @@ mod platform {
         })
     }
 
-    /// Find the first touchpad input device by scanning /dev/input/
     fn find_touchpad_device() -> Result<std::path::PathBuf> {
         let input_dir = Path::new("/dev/input");
         if !input_dir.exists() {
@@ -928,7 +923,6 @@ mod platform {
                 continue;
             }
 
-            // Try to open and identify the device
             let device = match Device::open(&path) {
                 Ok(d) => d,
                 Err(_) => continue,
@@ -936,26 +930,23 @@ mod platform {
 
             let device_name = device.name().unwrap_or("").to_lowercase();
 
-            // Check for touchpad capability: must have multi-touch X/Y
-            let has_mt_x = device
-                .get_abs_info(evdev::AbsoluteAxisType(ABS_MT_POSITION_X))
-                .is_ok();
-            let has_mt_y = device
-                .get_abs_info(evdev::AbsoluteAxisType(ABS_MT_POSITION_Y))
-                .is_ok();
+            let abs_state = match device.get_abs_state() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let has_mt = abs_state[AbsoluteAxisType(ABS_MT_POSITION_X).0 as usize].maximum != 0
+                && abs_state[AbsoluteAxisType(ABS_MT_POSITION_Y).0 as usize].maximum != 0;
 
-            if !has_mt_x || !has_mt_y {
+            if !has_mt {
                 continue;
             }
 
-            // Score the device based on name
             let score = score_touchpad_name(&device_name);
             if score > 0 {
                 candidates.push((path, score));
             }
         }
 
-        // Sort by score descending, pick the best match
         candidates.sort_by(|a, b| b.1.cmp(&a.1));
 
         if let Some((best, _)) = candidates.into_iter().next() {
@@ -967,44 +958,36 @@ mod platform {
         ))
     }
 
-    /// Score a device name for how likely it is to be the main touchpad
     fn score_touchpad_name(name: &str) -> u32 {
         let keywords = [
             ("touchpad", 100u32),
-            ("touch pad", 100),
-            ("synaptics", 90),
-            ("elan", 90),
-            ("tpps/2", 85),
-            ("alps", 80),
-            ("cypress", 75),
-            ("sentelic", 70),
-            ("fti", 60),
-            ("wacom", 50),
-            ("i2c", 40),
-            ("hid", 30),
-            ("msft", 25),
-            ("pnp0c50", 25),
-            ("pointing stick", -50),
-            ("trackpoint", -50),
-            ("keyboard", -100),
-            ("mouse", -50),
+            ("touch pad", 100u32),
+            ("synaptics", 90u32),
+            ("elan", 90u32),
+            ("tpps/2", 85u32),
+            ("alps", 80u32),
+            ("cypress", 75u32),
+            ("sentelic", 70u32),
+            ("fti", 60u32),
+            ("wacom", 50u32),
+            ("i2c", 40u32),
+            ("hid", 30u32),
+            ("msft", 25u32),
+            ("pnp0c50", 25u32),
         ];
+        let negative_keywords = ["pointing stick", "trackpoint", "keyboard", "mouse"];
 
         let mut score = 0u32;
         for (kw, s) in &keywords {
             if name.contains(kw) {
-                if *s > 50 {
-                    // strong positive signals
-                    score = score.max(*s);
-                } else if *s > 0 {
-                    score = score.saturating_add(*s);
-                } else {
-                    // negative signals - subtract
-                    score = score.saturating_sub(s.unsigned_abs());
-                }
+                score = score.max(*s);
             }
         }
-
+        for kw in &negative_keywords {
+            if name.contains(kw) {
+                score = 0u32;
+            }
+        }
         score
     }
 
@@ -1022,7 +1005,7 @@ mod platform {
         screen_height: f64,
         x_scale: f64,
         y_scale: f64,
-        active_contacts: HashMap<u32, (f64, f64)>, // slot -> (normalized_x, normalized_y)
+        active_contacts: HashMap<u32, (f64, f64)>,
         active_centroid: Option<PointF>,
         pending_centroid: Option<PointF>,
         stable_activation_frames: u8,
@@ -1030,7 +1013,7 @@ mod platform {
     }
 
     impl TouchpadEvdevState {
-        fn process_events(&mut self, events: FetchEventsSynced<'_, '_>) -> Result<()> {
+        fn process_events(&mut self, events: FetchEventsSynced<'_>) -> Result<()> {
             let mut current_slot: u32 = 0;
             let mut syn_received = false;
 
@@ -1039,18 +1022,15 @@ mod platform {
                 let code = event.code();
                 let value = event.value();
 
-                if event_type == EventType::EV_ABS {
+                if event_type == evdev::EventType::ABSOLUTE {
                     match code {
                         ABS_MT_SLOT => {
                             current_slot = value as u32;
                         }
                         ABS_MT_TRACKING_ID => {
                             if value < 0 {
-                                // Finger lifted
                                 self.active_contacts.remove(&current_slot);
                             } else {
-                                // New or continuing contact - ensure the slot exists
-                                // (will be updated when we get X/Y)
                                 if !self.active_contacts.contains_key(&current_slot) {
                                     self.active_contacts.insert(current_slot, (0.0, 0.0));
                                 }
@@ -1082,7 +1062,7 @@ mod platform {
                         }
                         _ => {}
                     }
-                } else if event_type == EventType::EV_SYN {
+                } else if event_type == EventType::SYNCHRONIZATION {
                     syn_received = true;
                 }
             }
@@ -1098,7 +1078,6 @@ mod platform {
             let finger_count = self.active_contacts.len();
 
             if finger_count == self.required_fingers as usize && !self.active_contacts.is_empty() {
-                // Compute centroid
                 let (sum_x, sum_y) = self
                     .active_contacts
                     .values()
@@ -1144,7 +1123,6 @@ mod platform {
                 return;
             }
 
-            // Not the right number of fingers
             self.pending_centroid = None;
             self.stable_activation_frames = 0;
             self.missing_frames = self.missing_frames.saturating_add(1);

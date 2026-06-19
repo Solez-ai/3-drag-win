@@ -419,6 +419,7 @@ mod platform {
 mod platform {
     use super::{AppCommand, AppConfig, AppPaths, Result, Sender, anyhow};
     use tray_item::TrayItem;
+    use std::sync::Arc;
 
     pub struct TrayHandle {
         _tray: TrayItem,
@@ -442,9 +443,6 @@ mod platform {
             config.deadzone_pixels
         ))
         .map_err(|error| anyhow!("failed to add tray label: {error}"))?;
-        tray.inner_mut()
-            .add_separator()
-            .map_err(|error| anyhow!("failed to add tray separator: {error}"))?;
 
         add_action(
             &mut tray,
@@ -458,9 +456,6 @@ mod platform {
             "Disable dragging",
             AppCommand::DisableDragging,
         )?;
-        tray.inner_mut()
-            .add_separator()
-            .map_err(|error| anyhow!("failed to add tray separator: {error}"))?;
         add_action(
             &mut tray,
             &sender,
@@ -473,9 +468,6 @@ mod platform {
             "Disable auto start",
             AppCommand::DisableAutoStart,
         )?;
-        tray.inner_mut()
-            .add_separator()
-            .map_err(|error| anyhow!("failed to add tray separator: {error}"))?;
         add_action(
             &mut tray,
             &sender,
@@ -494,9 +486,6 @@ mod platform {
             "Open log folder",
             AppCommand::OpenLogDirectory,
         )?;
-        tray.inner_mut()
-            .add_separator()
-            .map_err(|error| anyhow!("failed to add tray separator: {error}"))?;
         add_action(&mut tray, &sender, "Exit", AppCommand::Exit)?;
 
         Ok(TrayHandle { _tray: tray })
@@ -509,8 +498,9 @@ mod platform {
         command: AppCommand,
     ) -> Result<()> {
         let sender = sender.clone();
+        let command = Arc::new(command);
         tray.add_menu_item(label, move || {
-            let _ = sender.send(command);
+            let _ = sender.send((*command).clone());
         })
         .map_err(|error| anyhow!("failed to add tray menu item '{label}': {error}"))
     }

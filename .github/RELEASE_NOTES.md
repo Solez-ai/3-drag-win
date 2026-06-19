@@ -1,4 +1,4 @@
-## 3-win-drag v0.1.1
+## 3-win-drag v0.1.2
 
 Ever wanted to move a window by grabbing it from anywhere, not just the title bar? That's what this does. Put three fingers on your touchpad and drag. Works on Windows and Linux.
 
@@ -8,10 +8,15 @@ I built this because I got tired of reaching for tiny title bars. macOS has thre
 
 Pick your platform:
 
-- **3-win-drag-windows-x64.zip** -- Windows 10 and 11. Unzip and run 3-win-drag.exe.
-- **3-win-drag-linux-x86_64.tar.gz** -- Linux x86_64 with glibc. Tested on Ubuntu 22.04 and 24.04.
-- **3-win-drag-linux-x86_64-musl.tar.gz** -- Linux x86_64, statically linked. Works on distros without glibc.
-- **3-win-drag-linux-aarch64.tar.gz** -- Linux ARM64. For Raspberry Pis, Apple Silicon VMs, etc.
+- **3-win-drag-windows-x64.exe** -- Windows 10 and 11. Download and run.
+- **3-win-drag-linux-x86_64** -- Linux x86_64 with glibc. Tested on Ubuntu 22.04 and 24.04. Make executable with `chmod +x`.
+
+### What's new in v0.1.2
+
+- Fixed all compilation errors for Rust 1.96.0 (edition 2024)
+- Updated all dependencies to latest compatible versions
+- Better Linux backend support across X11 and Wayland compositors
+- Arch Linux compatibility improvements
 
 ### What works
 
@@ -36,3 +41,4 @@ Pick your platform:
 - Wayland mouse clicks only work on Hyprland. Sway and KDE can move windows but not simulate clicks.
 - GNOME Wayland is not supported. Use X11 or switch to Hyprland/Sway/KDE.
 - Windows built-in three-finger gestures might conflict. Turn them off in Windows Settings.
+- Cross-compiled binaries for musl/aarch64/armv7/riscv64 are built via CI on tagged releases.

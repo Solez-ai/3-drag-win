@@ -1301,11 +1301,14 @@ mod platform {
     };
     use crossbeam_channel as crossbeam;
     use glib;
+    use glib::MainLoop;
     use gtk4 as gtk;
     use gtk::prelude::*;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::mpsc;
     use std::thread;
+    use std::time::Duration;
 
     enum SettingsCommand {
         Open,
@@ -1374,6 +1377,10 @@ mod platform {
             return;
         }
 
+        // --- Create the main loop (needs to be before closures that capture it) ---
+        let main_loop = glib::MainLoop::new(None, false);
+        let main_loop_clone = main_loop.clone();
+
         // --- Create the window ---
         let window = gtk::Window::builder()
             .title("3-win-drag Settings")
@@ -1385,11 +1392,8 @@ mod platform {
         // Set window icon from the PNG generated at build time
         let icon_path = std::path::PathBuf::from(env!("THREE_WIN_DRAG_ICON_PATH"));
         if icon_path.exists() {
-            if let Ok(pixbuf) = gdk_pixbuf::Pixbuf::from_file(&icon_path) {
-                // for_pixbuf() returns Texture (not Option) in gtk4-rs 0.9.x
-                let texture = gtk::gdk::Texture::for_pixbuf(&pixbuf);
-                window.set_icon(Some(&texture));
-            }
+            // Set window icon using the icon name or file reference
+            window.set_icon_name(Some("applications-utilities"));
         }
 
         // --- Layout: main vertical box with margins ---
@@ -1626,19 +1630,29 @@ mod platform {
         let paths_clone1 = paths.clone();
         let sender_clone1 = sender.clone();
         let sl1 = status_label.clone();
+        let pd2 = profile_dropdown.clone();
+        let ad2 = action_dropdown.clone();
+        let fc2 = finger_count_entry.clone();
+        let sens2 = sensitivity_entry.clone();
+        let dz2 = deadzone_entry.clone();
+        let mi2 = min_interval_entry.clone();
+        let sm2 = smoothing_entry.clone();
+        let en2 = enabled_check.clone();
+        let aut2 = autostart_check.clone();
+        let fs2 = fullscreen_check.clone();
 
         apply_button.connect_clicked(move |_| {
             match collect_form_config_gtk(
-                &profile_dropdown,
-                &action_dropdown,
-                &finger_count_entry,
-                &sensitivity_entry,
-                &deadzone_entry,
-                &min_interval_entry,
-                &smoothing_entry,
-                &enabled_check,
-                &autostart_check,
-                &fullscreen_check,
+                &pd2,
+                &ad2,
+                &fc2,
+                &sens2,
+                &dz2,
+                &mi2,
+                &sm2,
+                &en2,
+                &aut2,
+                &fs2,
                 &templates_clone2,
             ) {
                 Ok(config) => {
@@ -1777,9 +1791,8 @@ mod platform {
             glib::Propagation::Stop
         });
 
-        // --- Command channel: forward from crossbeam to glib ---
-        let (glib_tx, glib_rx) =
-            glib::MainContext::channel::<SettingsCommand>(glib::Priority::DEFAULT);
+        // --- Command channel: forward from crossbeam to glib via an mpsc channel ---
+        let (glib_tx, glib_rx) = mpsc::channel::<SettingsCommand>();
 
         thread::spawn(move || {
             while let Ok(cmd) = cmd_rx.recv() {
@@ -1792,7 +1805,9 @@ mod platform {
         // --- Hide window initially ---
         window.set_visible(false);
 
-        // --- Handle commands on the GTK thread ---
+        // --- Handle commands via polling the mpsc channel on a glib timeout ---
+        let glib_rx = std::sync::Mutex::new(glib_rx);
+
         let w = window.clone();
         let paths_cmd = paths.clone();
         let hw_cmd = hardware.clone();
@@ -1810,63 +1825,67 @@ mod platform {
         let fs_cmd = fullscreen_check.clone();
         let sl_cmd = status_label.clone();
 
-        glib_rx.attach(None, move |cmd| {
-            match cmd {
-                SettingsCommand::Open => {
-                    // Reload config from disk on open
-                    let config = AppConfig::load_or_create(&paths_cmd).unwrap_or_default();
-                    load_form(
-                        &config,
-                        &hw_cmd,
-                        &templates_cmd,
-                        &pd_cmd,
-                        &td_cmd,
-                        &ad_cmd,
-                        &fc_cmd,
-                        &sens_cmd,
-                        &dz_cmd,
-                        &mi_cmd,
-                        &sm_cmd,
-                        &en_cmd,
-                        &aut_cmd,
-                        &fs_cmd,
-                    );
-                    w.present();
-                    w.grab_focus();
-                }
-                SettingsCommand::Refresh => {
-                    if w.is_visible() {
-                        let config =
-                            AppConfig::load_or_create(&paths_cmd).unwrap_or_default();
-                        load_form(
-                            &config,
-                            &hw_cmd,
-                            &templates_cmd,
-                            &pd_cmd,
-                            &td_cmd,
-                            &ad_cmd,
-                            &fc_cmd,
-                            &sens_cmd,
-                            &dz_cmd,
-                            &mi_cmd,
-                            &sm_cmd,
-                            &en_cmd,
-                            &aut_cmd,
-                            &fs_cmd,
-                        );
+        glib::timeout_add_local(
+            Duration::from_millis(50),
+            move || {
+                let rx = glib_rx.lock().unwrap();
+                while let Ok(cmd) = rx.try_recv() {
+                    match cmd {
+                        SettingsCommand::Open => {
+                            let config = AppConfig::load_or_create(&paths_cmd).unwrap_or_default();
+                            load_form(
+                                &config,
+                                &hw_cmd,
+                                &templates_cmd,
+                                &pd_cmd,
+                                &td_cmd,
+                                &ad_cmd,
+                                &fc_cmd,
+                                &sens_cmd,
+                                &dz_cmd,
+                                &mi_cmd,
+                                &sm_cmd,
+                                &en_cmd,
+                                &aut_cmd,
+                                &fs_cmd,
+                            );
+                            w.present();
+                            w.grab_focus();
+                        }
+                        SettingsCommand::Refresh => {
+                            if w.is_visible() {
+                                let config = AppConfig::load_or_create(&paths_cmd).unwrap_or_default();
+                                load_form(
+                                    &config,
+                                    &hw_cmd,
+                                    &templates_cmd,
+                                    &pd_cmd,
+                                    &td_cmd,
+                                    &ad_cmd,
+                                    &fc_cmd,
+                                    &sens_cmd,
+                                    &dz_cmd,
+                                    &mi_cmd,
+                                    &sm_cmd,
+                                    &en_cmd,
+                                    &aut_cmd,
+                                    &fs_cmd,
+                                );
+                            }
+                        }
+                        SettingsCommand::Shutdown => {
+                            w.close();
+                            main_loop_clone.quit();
+                            return glib::ControlFlow::Break;
+                        }
                     }
                 }
-                SettingsCommand::Shutdown => {
-                    w.close();
-                    gtk::main_quit();
-                    return glib::ControlFlow::Break;
-                }
-            }
-            glib::ControlFlow::Continue
-        });
+                glib::ControlFlow::Continue
+            },
+        );
 
         // --- Run GTK main loop ---
-        gtk::main();
+        main_loop.run();
     }
 
     // --- GTK utility functions ---
