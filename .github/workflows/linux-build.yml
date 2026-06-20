@@ -37,9 +37,9 @@ jobs:
         run: |
           $pkg = "${{ matrix.asset_name }}"
           New-Item -ItemType Directory -Path $pkg -Force | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/3-win-drag${{ matrix.ext }}" "$pkg/"
-          Copy-Item README.md LICENSE "$pkg/"
-          Compress-Archive -Path "$pkg/*" -DestinationPath "${pkg}.zip" -Force
+          Copy-Item "target/${{ matrix.target }}/release/3-win-drag${{ matrix.ext }}" "$pkg"
+          Copy-Item README.md LICENSE "$pkg"
+          Compress-Archive -Path "$pkg\*" -DestinationPath "${pkg}.zip" -Force
 
       - name: Install Inno Setup
         if: runner.os == 'Windows'
