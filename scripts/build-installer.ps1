@@ -1,3 +1,7 @@
+param(
+    [switch]$SkipBuild
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -8,7 +12,7 @@ $readmePath = Join-Path $projectRoot "README.md"
 $licensePath = Join-Path $projectRoot "LICENSE"
 $logoPath = Join-Path $projectRoot "logo.png"
 $issPath = Join-Path $projectRoot "installer\3-win-drag.iss"
-$releaseExePath = Join-Path $projectRoot "target\x86_64-pc-windows-gnu\release\3-win-drag.exe"
+$releaseExePath = Join-Path $projectRoot "target\release\3-win-drag.exe"
 $distRoot = Join-Path $projectRoot "dist"
 $assetRoot = Join-Path $distRoot "installer-assets"
 $installerRoot = Join-Path $distRoot "installer"
@@ -180,6 +184,7 @@ function Get-InnoSetupCompiler {
     $fallbacks = @(
         "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
         "C:\Program Files\Inno Setup 6\ISCC.exe",
+        "C:\ProgramData\chocolatey\lib\innosetup\tools\ISCC.exe",
         (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe")
     )
 
@@ -214,13 +219,21 @@ New-Directory -Path $installerRoot
 
 Push-Location $projectRoot
 try {
-    Stop-RunningBuildBinary
+    if (-not $SkipBuild) {
+        Stop-RunningBuildBinary
 
-    Write-Host "Building release executable..."
-    cargo build --release
+        Write-Host "Building release executable..."
+        cargo build --release
 
-    if (-not (Test-Path $releaseExePath)) {
-        throw "The release executable was not produced at $releaseExePath."
+        if (-not (Test-Path $releaseExePath)) {
+            throw "The release executable was not produced at $releaseExePath."
+        }
+    }
+    else {
+        Write-Host "Skipping cargo build (using existing binary)..."
+        if (-not (Test-Path $releaseExePath)) {
+            throw "No existing binary found at $releaseExePath. Build it first or run without -SkipBuild."
+        }
     }
 
     Write-Host "Generating installer assets..."

@@ -50,7 +50,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Files]
-Source: "..\target\x86_64-pc-windows-gnu\release\3-win-drag.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\target\release\3-win-drag.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\logo.png"; DestDir: "{app}"; Flags: ignoreversion

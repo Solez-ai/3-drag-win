@@ -32,7 +32,7 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package
+      - name: Package (zip)
         shell: pwsh
         run: |
           $pkg = "${{ matrix.asset_name }}"
@@ -41,10 +41,32 @@ jobs:
           Copy-Item README.md LICENSE "$pkg/"
           Compress-Archive -Path "$pkg/*" -DestinationPath "${pkg}.zip" -Force
 
-      - uses: actions/upload-artifact@v4
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        run: choco install innosetup --no-progress --confirm
+
+      - name: Build installer (.exe)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path target/release -Force | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/3-win-drag.exe" "target/release/3-win-drag.exe"
+          & .\scripts\build-installer.ps1 -SkipBuild
+
+      - name: Upload (zip)
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
           path: ${{ matrix.asset_name }}.*
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Upload (installer)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3-win-drag-installer
+          path: dist/installer/*.exe
           compression-level: 0
           if-no-files-found: error
 
