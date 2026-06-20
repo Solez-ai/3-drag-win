@@ -40,14 +40,6 @@ fn build_launcher() -> Result<AutoLaunch> {
     #[cfg(windows)]
     builder.set_windows_enable_mode(WindowsEnableMode::CurrentUser);
 
-    #[cfg(target_os = "linux")]
-    {
-        // On Linux, auto-launch uses XDG autostart (.desktop files).
-        // The default behavior creates ~/.config/autostart/3-win-drag.desktop.
-        // We need to pass the full path with any X11-specific arguments.
-        builder.set_app_path(&format!("{exe}"));
-    }
-
     builder
         .build()
         .context("failed to create auto-launch entry")

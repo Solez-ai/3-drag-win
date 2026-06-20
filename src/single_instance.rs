@@ -25,17 +25,19 @@ mod platform {
     }
 
     pub fn acquire() -> Result<SingleInstanceGuard> {
-        let name = wide("Local\\\\ThreeWinDragSingleton");
+        let name = wide("Local\\ThreeWinDragSingleton");
         unsafe {
             let handle = CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr());
             if handle.is_null() {
-                return Err(anyhow!("failed to create application instance mutex"));
+                return Err(anyhow!(
+                    "3-win-drag could not start (system error). Try restarting your computer if it keeps happening."
+                ));
             }
 
             if GetLastError() == ERROR_ALREADY_EXISTS {
                 let _ = CloseHandle(handle);
                 return Err(anyhow!(
-                    "3-win-drag is already running. Close the existing tray instance first."
+                    "3-win-drag is already running. Check your system tray for the icon."
                 ));
             }
 
